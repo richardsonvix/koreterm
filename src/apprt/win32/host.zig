@@ -8386,7 +8386,7 @@ pub const Host = struct {
     /// The ▾ menu's About koreterm: the version, in a Windows dialog.
     fn showAbout(self: *Host) void {
         const alloc = self.app.core_app.alloc;
-        const text = std.fmt.allocPrint(alloc, "koreterm {s}\n\nA Windows terminal based on Ghostty, with Remote Desktop tabs.", .{build_config.version_string}) catch return;
+        const text = std.fmt.allocPrint(alloc, "koreterm {s}\n\nA Windows terminal based on Ghostty, with Remote Desktop tabs.\n\nBased on a fork of amanthanvi/noctty.", .{build_config.version_string}) catch return;
         defer alloc.free(text);
         const text_w = std.unicode.utf8ToUtf16LeAllocZ(alloc, text) catch return;
         defer alloc.free(text_w);
