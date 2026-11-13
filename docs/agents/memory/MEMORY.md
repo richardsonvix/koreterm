@@ -5,3 +5,4 @@
 - [RDP groups](rdp-groups.md) — grid of watch-only RDP sessions plus detach/dock and RDP tab hint, built into 1.3.144 on 2026-11-13 (only rdp + settings_patch filters tested); verify on real sessions
 - [Tab capture backlog](tab-capture-backlog.md) — pending request: screenshot / video (start-stop) to Downloads and fullscreen from any tab's right-click menu
 - [Build environment](koreterm-build-env.md) — ZIG_GLOBAL_CACHE_DIR on D:, known TABGAP failure, update.zip packaging steps
+- [CI removed](ci-workflows-disabled.md) — fork has no GitHub Actions: workflows disabled then deleted 2026-11-13
