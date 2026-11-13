@@ -74,6 +74,7 @@ const closeRightTabsConfirmAccept = win32.closeRightTabsConfirmAccept;
 const closeThisTabConfirmAccept = win32.closeThisTabConfirmAccept;
 const config_edit = @import("../../config/edit.zig");
 const rdp_pane = @import("rdp_pane.zig");
+const rdp_group = @import("rdp_group.zig");
 const local_update = @import("local_update.zig");
 const config_file_load = @import("../../config/file_load.zig");
 const configpkg = @import("../../config.zig");
@@ -6108,6 +6109,118 @@ pub const App = struct {
         });
     }
 
+    /// A tab, beside `source`, showing the Remote Desktop session `pane`
+    /// that left a group (`rdp_group.zig`), named `label`. The pane is the
+    /// tab's once this returns; on an error it is still the caller's.
+    pub fn openAdoptedRdpTab(self: *App, source: *Surface, pane: *rdp_pane.Pane, label: []const u8) !void {
+        const host = source.host orelse return error.NoActiveSurface;
+        var config = try apprt.surface.newConfig(self.core_app, &self.config, .tab);
+        defer config.deinit();
+        const title_w = try std.unicode.utf8ToUtf16LeAllocZ(self.core_app.alloc, label);
+        defer self.core_app.alloc.free(title_w);
+        _ = try self.createWindowSurface(&config, title_w.ptr, .{
+            .host_id = source.host_id,
+            .tab_insert_index = windowNewTabInsertIndex(host, self.config.@"window-new-tab-position"),
+            .clone_state_from = source,
+            .adopt_rdp = pane,
+            .adopt_rdp_label = label,
+        });
+    }
+
+    /// A tab, beside `source`, showing a group of Remote Desktop sessions
+    /// (`rdp_group.zig`): empty, or the saved group `start` names.
+    pub fn openRdpGroupTab(self: *App, source: *Surface, start: rdp_group.Start) !*Surface {
+        const host = source.host orelse return error.NoActiveSurface;
+        var config = try apprt.surface.newConfig(self.core_app, &self.config, .tab);
+        defer config.deinit();
+        const surface = try self.createWindowSurface(&config, std.unicode.utf8ToUtf16LeStringLiteral("Remote Desktop group"), .{
+            .host_id = source.host_id,
+            .tab_insert_index = windowNewTabInsertIndex(host, self.config.@"window-new-tab-position"),
+            .clone_state_from = source,
+            .rdp_group = start,
+        });
+        self.activateSurface(surface);
+        return surface;
+    }
+
+    /// The tab menu's Detach: `source`'s Remote Desktop session moves, still
+    /// connected, into a new koreterm window of its own (with its tab strip,
+    /// not full screen), which can go to another monitor; its tab menu then
+    /// offers Dock (`dockRdpTab`) back into this window.
+    pub fn detachRdpTab(self: *App, source: *Surface) !void {
+        const pane = source.rdp_pane orelse return error.NoRemoteDesktopSession;
+        const host = source.host orelse return error.NoActiveSurface;
+        // Its window's only tab is a window of its own already.
+        if (host.tabs.items.len < 2) return error.AlreadyAlone;
+        const host_id = source.host_id;
+        const alloc = self.core_app.alloc;
+        const label = try alloc.dupe(u8, source.effectiveTitle() orelse "Remote Desktop");
+        defer alloc.free(label);
+        const title_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, label);
+        defer alloc.free(title_w);
+        var config = try apprt.surface.newConfig(self.core_app, &self.config, .window);
+        defer config.deinit();
+        _ = source.takeRdpPane();
+        const surface = self.createWindowSurface(&config, title_w.ptr, .{
+            .window = .from(self.registry.newWindowSource(.{ .surface = source.core() }), &.{}),
+            .adopt_rdp = pane,
+            .adopt_rdp_label = label,
+        }) catch |err| {
+            // Back where it was.
+            source.rdp_pane = pane;
+            return err;
+        };
+        surface.rdp_dock_host = host_id;
+        self.closeRdpTabAfterGroup(source);
+    }
+
+    /// The tab menu's Dock on a detached Remote Desktop tab: its session
+    /// moves, still connected, back into the window it was detached from
+    /// (or another koreterm window, when that one is gone), and this tab
+    /// closes (its window with it, when it was the only tab).
+    pub fn dockRdpTab(self: *App, source: *Surface) !void {
+        const pane = source.rdp_pane orelse return error.NoRemoteDesktopSession;
+        const target_host = self.dockTarget(source) orelse return error.NoOtherWindow;
+        const target_surface = target_host.activeSurface() orelse return error.NoActiveSurface;
+        const alloc = self.core_app.alloc;
+        const label = try alloc.dupe(u8, source.effectiveTitle() orelse "Remote Desktop");
+        defer alloc.free(label);
+        _ = source.takeRdpPane();
+        self.openAdoptedRdpTab(target_surface, pane, label) catch |err| {
+            source.rdp_pane = pane;
+            return err;
+        };
+        if (target_host.hwnd) |hwnd| _ = sys.SetForegroundWindow(hwnd);
+        self.closeRdpTabAfterGroup(source);
+    }
+
+    /// The window a detached tab docks into: the one it was detached from,
+    /// else any other koreterm window. Null when there is none.
+    pub fn dockTarget(self: *App, source: *const Surface) ?*Host {
+        if (source.rdp_dock_host) |id| if (self.registry.findHostById(id)) |host| {
+            if (host != source.host) return host;
+        };
+        for (self.registry.hosts.items) |host| {
+            if (host != source.host and host.hwnd != null and host.tabs.items.len != 0) return host;
+        }
+        return null;
+    }
+
+    /// `surface`'s tab, whose session went into a group: closed without
+    /// asking (its placeholder shell is all it runs), and its window with
+    /// it when it was the window's only tab.
+    pub fn closeRdpTabAfterGroup(self: *App, surface: *Surface) void {
+        const found = Host.findTabForSurface(surface) orelse return;
+        if (found.host.tabs.items.len == 1) {
+            // Nothing to ask about: the session moved out of it.
+            found.host.closeConfirmed();
+            return;
+        }
+        _ = self.closeTabUndoable(found.host, found.index) catch |err| {
+            log.warn("rdp group: the joined tab could not close err={}", .{err});
+        };
+    }
+
     pub fn createWindow(self: *App, title: LPCWSTR) !void {
         // The first window runs the app config itself, and a clone only when
         // a default profile's variables, line and directory go on it.
@@ -7909,7 +8022,17 @@ pub const App = struct {
 
     /// Detach tab `current_idx` into undo history and show what is left. Asks
     /// nothing: `closeTab` decides whether the close needs a prompt first.
-    pub fn closeTabUndoable(self: *App, host: *Host, current_idx: usize) !bool {
+    pub fn closeTabUndoable(self: *App, host: *Host, current_idx_in: usize) !bool {
+        // A group of Remote Desktop sessions lets each go back to a tab of
+        // its own first (none is closed). That opens tabs, so the closing
+        // one is found again by its id.
+        var current_idx = current_idx_in;
+        if (current_idx < host.tabs.items.len) {
+            const tab_id = host.tabs.items[current_idx].id;
+            if (host.tabs.items[current_idx].focusedSurface()) |surface| if (surface.releaseRdpGroup()) {
+                current_idx = host.findTabIndexById(tab_id) orelse return false;
+            };
+        }
         const previous_active = host.active_tab;
         // The session's last tab: saved now, as its window's close would save
         // it, and not left to the empty window's undo expiry. Undo history is

@@ -18,6 +18,9 @@
 //! a save that changed either writes it whole (`Edit.Op.list`). The file's own
 //! lines for the key go, and `key =` (which clears what any earlier layer
 //! gave) then one line per value take the place of the first of them.
+//! `profile-favorite` and `profile-notes` are lists too, each written whole
+//! on its own when it changed: a favorite or a note does not write the
+//! order and the hidden list.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -40,6 +43,10 @@ pub const Field = enum {
     order,
     /// `profile-hidden`: written whole (`Edit.Op.list`).
     hidden,
+    /// `profile-favorite`: written whole (`Edit.Op.list`), on its own.
+    favorites,
+    /// `profile-notes`: written whole (`Edit.Op.list`), on its own.
+    notes,
 
     pub fn key(self: Field) Key {
         return switch (self) {
@@ -49,12 +56,14 @@ pub const Field = enum {
             .env => .@"profile-env",
             .order => .@"profile-order",
             .hidden => .@"profile-hidden",
+            .favorites => .@"profile-favorite",
+            .notes => .@"profile-notes",
         };
     }
 
     /// Whether it is one of the lists, written whole.
     pub fn isList(self: Field) bool {
-        return self == .order or self == .hidden;
+        return self == .order or self == .hidden or self == .favorites or self == .notes;
     }
 
     fn kind(comptime self: Field) profile_map.Kind {
@@ -63,7 +72,7 @@ pub const Field = enum {
             .name => .name,
             .folder => .text,
             .env => .env,
-            .order, .hidden => @compileError("a list gives no profile a value"),
+            .order, .hidden, .favorites, .notes => @compileError("a list gives no profile a value"),
         };
     }
 
@@ -166,7 +175,7 @@ fn readLine(segment: []const u8) ?Info {
     value = std.mem.trim(u8, value, &std.ascii.whitespace);
     if (value.len == 0) return .{ .field = field, .id = "", .scope = .key };
     const parsed = switch (field) {
-        .order, .hidden => unreachable,
+        .order, .hidden, .favorites, .notes => unreachable,
         inline else => |f| profile_map.check(comptime f.kind(), value),
     } catch return null;
     if (field != .env) return .{ .field = field, .id = parsed.id, .scope = .exact };
@@ -249,11 +258,14 @@ fn listValueEql(a_raw: []const u8, b_raw: []const u8) bool {
     return std.ascii.eqlIgnoreCase(a, b);
 }
 
-/// The list `config` gives `field` (`order` or `hidden`).
+/// The list `config` gives `field` (`order`, `hidden`, `favorites` or
+/// `notes`).
 fn listOf(field: Field, config: *const Config) []const [:0]const u8 {
     return switch (field) {
         .order => config.@"profile-order".list.items,
         .hidden => config.@"profile-hidden".list.items,
+        .favorites => config.@"profile-favorite".list.items,
+        .notes => config.@"profile-notes".list.items,
         else => unreachable,
     };
 }
@@ -284,7 +296,7 @@ fn listCheck(field: Field, values: []const []const u8, reloaded: *const Config, 
     const now = listOf(field, reloaded);
     if (now.len < values.len) return .masked;
     for (values, now[0..values.len]) |value, held| if (!listValueEql(value, held)) return .masked;
-    if (field == .order) return .held;
+    if (field != .hidden) return .held;
     var check: Check = .held;
     for (now[values.len..]) |extra| {
         for (values) |value| {
@@ -312,10 +324,14 @@ fn namesOnlyNamed(extra: []const u8, values: []const []const u8, profiles: []con
     return names_any;
 }
 
-/// Whether a save of `pending` writes the lists (`listEdits`): it holds
-/// either otherwise than `original`.
+/// Every list a save may write whole.
+const list_fields = [_]Field{ .order, .hidden, .favorites, .notes };
+
+/// Whether a save of `pending` writes a list (`listEdits`): it holds one
+/// otherwise than `original`.
 pub fn listsChanged(original: *const Config, pending: *const Config) bool {
-    return !listEql(.order, original, pending) or !listEql(.hidden, original, pending);
+    for (list_fields) |field| if (!listEql(field, original, pending)) return true;
+    return false;
 }
 
 /// Why Settings cannot change the profiles' order and visibility
@@ -343,11 +359,11 @@ pub const ListsForeign = enum {
     /// The reason, as the status line says it.
     pub fn text(self: ListsForeign) []const u8 {
         return switch (self) {
-            .command_line => "The command line sets the profile order or the hidden profiles, so Settings can't change them: a save would copy its values into the config file.",
-            .later_file => "A config file read after the one Settings saves to sets the profile order or the hidden profiles, so Settings can't change them: a save would copy its values into the config file.",
-            .theme => "The light and dark themes give different profile orders or hidden profiles, so Settings can't change them: a save would make one theme's choice apply in both.",
-            .unread => "The profile order and the hidden profiles could not be read in both the light and dark states, so Settings can't change them.",
-            .unordered => "A config file or the command line clears config-file, so the order the config files load in couldn't be worked out: a later one may set the profile order or the hidden profiles, so Settings can't change them.",
+            .command_line => "The command line sets the profile order, the hidden profiles, the favorites or the preset notes, so Settings can't change them: a save would copy its values into the config file.",
+            .later_file => "A config file read after the one Settings saves to sets the profile order, the hidden profiles, the favorites or the preset notes, so Settings can't change them: a save would copy its values into the config file.",
+            .theme => "The light and dark themes give different profile orders, hidden profiles, favorites or preset notes, so Settings can't change them: a save would make one theme's choice apply in both.",
+            .unread => "The profile order, the hidden profiles, the favorites and the preset notes could not be read in both the light and dark states, so Settings can't change them.",
+            .unordered => "A config file or the command line clears config-file, so the order the config files load in couldn't be worked out: a later one may set the profile order, the hidden profiles, the favorites or the preset notes, so Settings can't change them.",
         };
     }
 };
@@ -416,7 +432,7 @@ pub fn listsForeign(config: *const Config, path: []const u8, same: origin.SamePa
         readings[i] = if (switched[i]) |*reading| reading else config;
         if (unreadTheme(readings[i]) != null) return .unread;
     }
-    if (!listEql(.order, readings[0], readings[1]) or !listEql(.hidden, readings[0], readings[1])) return .theme;
+    for (list_fields) |field| if (!listEql(field, readings[0], readings[1])) return .theme;
     return null;
 }
 
@@ -477,7 +493,7 @@ fn clearsIncludes(text: []const u8) bool {
 /// Whether a step's argument (`--key=value`) sets `profile-order` or
 /// `profile-hidden`.
 fn setsList(text: []const u8) bool {
-    for ([_][]const u8{ "--profile-order", "--profile-hidden" }) |key| {
+    for ([_][]const u8{ "--profile-order", "--profile-hidden", "--profile-favorite", "--profile-notes" }) |key| {
         if (std.mem.startsWith(u8, text, key) and (text.len == key.len or text[key.len] == '=')) return true;
     }
     return false;
@@ -507,8 +523,14 @@ fn listEdits(arena: Allocator, original: *const Config, pending: *const Config) 
     var edits: std.ArrayListUnmanaged(Edit) = .empty;
     // Both blocks or neither: a move or a hide gives the page's order and
     // visibility whole, and each block is conflict-checked (`changedUnder`).
-    if (listEql(.order, original, pending) and listEql(.hidden, original, pending)) return edits.toOwnedSlice(arena);
-    for ([_]Field{ .order, .hidden }) |field| {
+    const both = !listEql(.order, original, pending) or !listEql(.hidden, original, pending);
+    for (list_fields) |field| {
+        // The favorites and the notes each on their own.
+        const writes = switch (field) {
+            .order, .hidden => both,
+            else => !listEql(field, original, pending),
+        };
+        if (!writes) continue;
         const items = listOf(field, pending);
         const values = try arena.alloc([]const u8, items.len);
         for (items, values) |item, *value| value.* = try arena.dupe(u8, item);
@@ -652,7 +674,7 @@ fn editLine(arena: Allocator, edit: Edit) ![]const u8 {
         .delete, .list => unreachable,
     };
     switch (edit.field) {
-        .order, .hidden => unreachable,
+        .order, .hidden, .favorites, .notes => unreachable,
         inline else => |field| try profile_map.writeProfileLine(&out.writer, comptime field.kind(), @tagName(comptime field.key()), edit.id, text),
     }
     return std.mem.trimEnd(u8, out.written(), "\n");
@@ -1132,7 +1154,7 @@ fn referencedElsewhere(readings: []const origin.Index, id: []const u8, path: []c
         }
         const config = problems.config;
         if (config.@"default-profile") |value| if (namesProfile(value, id)) return true;
-        for ([_][]const [:0]const u8{ config.@"profile-order".list.items, config.@"profile-hidden".list.items }) |values| {
+        for ([_][]const [:0]const u8{ config.@"profile-order".list.items, config.@"profile-hidden".list.items, config.@"profile-favorite".list.items }) |values| {
             for (values) |value| if (namesProfile(value, id)) return true;
         }
     }
@@ -1176,7 +1198,7 @@ fn editValue(edit: Edit, values: *const ProfileValues) ?[]const u8 {
         .command => values.command.get(edit.id),
         .name => values.name.get(edit.id),
         .folder => values.folder.get(edit.id),
-        .order, .hidden => unreachable,
+        .order, .hidden, .favorites, .notes => unreachable,
         .env => env: {
             const name = edit.name orelse break :env null;
             const map = values.env.get(edit.id) orelse break :env null;
@@ -1305,6 +1327,8 @@ pub const Baselines = struct {
     profiles: Baseline(ProfileValues),
     order: Baseline([]const [:0]const u8),
     hidden: Baseline([]const [:0]const u8),
+    favorites: Baseline([]const [:0]const u8),
+    notes: Baseline([]const [:0]const u8),
 
     /// Every group as `config` gives it, in its state: a config none of
     /// whose groups has followed a file since it was read.
@@ -1315,6 +1339,8 @@ pub const Baselines = struct {
             .profiles = .{ .values = .of(config), .places = places, .state = state },
             .order = .{ .values = config.@"profile-order".list.items, .places = places, .state = state },
             .hidden = .{ .values = config.@"profile-hidden".list.items, .places = places, .state = state },
+            .favorites = .{ .values = config.@"profile-favorite".list.items, .places = places, .state = state },
+            .notes = .{ .values = config.@"profile-notes".list.items, .places = places, .state = state },
         };
     }
 
@@ -1323,6 +1349,8 @@ pub const Baselines = struct {
         return switch (field) {
             .order => &self.order,
             .hidden => &self.hidden,
+            .favorites => &self.favorites,
+            .notes => &self.notes,
             else => unreachable,
         };
     }
@@ -1889,7 +1917,7 @@ const TestMaps = struct {
                 .folder => maps.folder.parseCLI(alloc, value) catch {},
                 .env => maps.env.parseCLI(alloc, value) catch {},
                 // `fromName` names a per-profile field only.
-                .order, .hidden => unreachable,
+                .order, .hidden, .favorites, .notes => unreachable,
             }
         }
         return maps;

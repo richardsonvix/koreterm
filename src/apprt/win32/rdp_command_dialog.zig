@@ -107,10 +107,17 @@ const Preset = enum {
     }
 };
 
-const intro_text = L("Sends a command to this remote desktop. Run box and PowerShell window type it into the session (Win+R), on its screen: koreterm sees only that the keys went, so check the session. PowerShell on the server runs it through WinRM and shows whether it ran and its output, but not on the screen.");
-const tips_text = L("Run box: explorer.exe (Explorer and the taskbar), taskmgr.exe, services.msc, eventvwr.msc, compmgmt.msc, control.exe, cmd.exe.\r\n" ++
-    "Explorer gone (black screen, no taskbar)? Win+R needs Explorer: use Open Task Manager, then Run new task, explorer.exe.\r\n" ++
-    "PowerShell: Restart-Service Spooler, Get-Service, Get-Process, Restart-Computer -Force. The command goes through this PC's clipboard.");
+const intro_text = intro: {
+    // A long UTF-16 literal made at compile time.
+    @setEvalBranchQuota(10000);
+    break :intro L("Sends a command to this remote desktop. Run box and PowerShell window type it into the session (Win+R), on its screen: koreterm sees only that the keys went, so check the session. PowerShell on the server runs it through WinRM and shows whether it ran and its output, but not on the screen.");
+};
+const tips_text = tips: {
+    @setEvalBranchQuota(10000);
+    break :tips L("Run box: explorer.exe (Explorer and the taskbar), taskmgr.exe, services.msc, eventvwr.msc, compmgmt.msc, control.exe, cmd.exe.\r\n" ++
+        "Explorer gone (black screen, no taskbar)? Win+R needs Explorer: use Open Task Manager, then Run new task, explorer.exe.\r\n" ++
+        "PowerShell: Restart-Service Spooler, Get-Service, Get-Process, Restart-Computer -Force. The command goes through this PC's clipboard.");
+};
 
 const IDOK: u16 = 1;
 const IDCANCEL: u16 = 2;
@@ -166,7 +173,11 @@ pub fn run(alloc: Allocator, owner: ?HWND, remote: Remote) Allocator.Error!Reque
     const shown = if (remote.title.len != 0) remote.title else remote.server;
     const title_text = try std.fmt.allocPrint(alloc, "Run command: {s}", .{shown});
     defer alloc.free(title_text);
-    const title = try std.unicode.utf8ToUtf16LeAllocZ(alloc, title_text);
+    // The server name came through the config, so it is valid UTF-8.
+    const title = std.unicode.utf8ToUtf16LeAllocZ(alloc, title_text) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.InvalidUtf8 => try alloc.dupeZ(u16, std.unicode.utf8ToUtf16LeStringLiteral("Run command")),
+    };
     defer alloc.free(title);
     var state: State = .{ .alloc = alloc, .remote = remote, .title = title };
     defer state.output.deinit(alloc);

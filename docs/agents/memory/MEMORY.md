@@ -1,0 +1,7 @@
+- [No build unless asked](no-build-unless-asked.md) — never run zig build/test/packaging unless the user explicitly asks
+- [Targeted tests](targeted-tests.md) — scale test runs to the change: build + -Dtest-filter mini-suites; full suite only for core changes or release
+- [Only own repo](only-own-repo.md) — gh/git targets richardsonvix/koreterm only, never fork parent amanthanvi/noctty
+- [RDP run command, uncompiled](rdp-run-command-uncompiled.md) — RDP command, favorites, preset notes, single-window launch, RDP DPI resize: built into 1.3.143 (2026-11-13) without tests; verify on a real RDP session
+- [RDP groups](rdp-groups.md) — grid of watch-only RDP sessions plus detach/dock and RDP tab hint, built into 1.3.144 on 2026-11-13 (only rdp + settings_patch filters tested); verify on real sessions
+- [Tab capture backlog](tab-capture-backlog.md) — pending request: screenshot / video (start-stop) to Downloads and fullscreen from any tab's right-click menu
+- [Build environment](koreterm-build-env.md) — ZIG_GLOBAL_CACHE_DIR on D:, known TABGAP failure, update.zip packaging steps

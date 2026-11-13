@@ -1,6 +1,7 @@
 //! Win32 host window and chrome state.
 const win32 = @import("../win32.zig");
 const Allocator = win32.Allocator;
+const rdp_group = @import("rdp_group.zig");
 const App = win32.App;
 const BOOL = win32.BOOL;
 const BannerButton = win32.BannerButton;
@@ -487,6 +488,15 @@ fn buildDropdownProfileLabel(
     };
     if (index < 9) try out.print(alloc, "\tCtrl+Shift+{d}", .{index + 1});
     return try out.toOwnedSlice(alloc);
+}
+
+/// Whether a value of `profile-favorite` names `profile`, as
+/// `profile-hidden` names profiles (`windows_shell.referenceNames`).
+fn isFavoriteProfile(profiles: []const windows_shell.Profile, favorites: []const [:0]const u8, profile: windows_shell.Profile) bool {
+    for (favorites) |value| {
+        if (windows_shell.referenceNames(profiles, value, profile)) return true;
+    }
+    return false;
 }
 
 fn buttonLabelRightInset(pinned_slot_ordinal: ?usize, target: ?OpenTarget) i32 {
@@ -3390,7 +3400,10 @@ pub const Host = struct {
         const alloc = self.app.core_app.alloc;
         // From the inputs the label was drawn with, so the tooltip and the
         // label agree on whether the title had to be cut.
-        const text = (tab_label.tooltip(alloc, tab.cachedKey()) catch return) orelse
+        // A Remote Desktop tab always says where it is connected (server,
+        // port, user); a group's tab, what it watches.
+        const rdp_hint: ?[]u8 = if (tab.focusedSurface()) |surface| surface.rdpHint(alloc) else null;
+        const text = rdp_hint orelse (tab_label.tooltip(alloc, tab.cachedKey()) catch return) orelse
             return self.hideTabTooltip();
         defer alloc.free(text);
 
@@ -8003,9 +8016,45 @@ pub const Host = struct {
         if (!is_rdp) _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_TAB_NEW_PROFILE, std.unicode.utf8ToUtf16LeStringLiteral("Create Profile from This Tab..."));
         // A command typed or run in the remote desktop: only while its
         // session is up.
-        if (is_rdp) {
-            const live_session = if (self.tabs.items[tab_index].focusedSurface()) |surface| surface.rdp_pane != null else false;
+        const tab_surface = self.tabs.items[tab_index].focusedSurface();
+        const group_tab: ?*rdp_group.Group = if (tab_surface) |surface| surface.rdp_group else null;
+        if (is_rdp and group_tab == null) {
+            const live_session = if (tab_surface) |surface| surface.rdp_pane != null else false;
             _ = sys.AppendMenuW(menu, if (live_session) c.MF_STRING else c.MF_GRAYED, c.CTX_TAB_RDP_COMMAND, std.unicode.utf8ToUtf16LeStringLiteral("Run Command on Remote Desktop..."));
+            // Add to Group: a new group's tab, or one already open.
+            if (sys.CreatePopupMenu()) |group_menu| {
+                _ = sys.AppendMenuW(group_menu, c.MF_STRING, c.CTX_TAB_RDP_GROUP_NEW, std.unicode.utf8ToUtf16LeStringLiteral("New Group"));
+                const open_groups = rdp_group.groups();
+                if (open_groups.len != 0) _ = sys.AppendMenuW(group_menu, c.MF_SEPARATOR, 0, null);
+                for (open_groups, 0..) |group, i| {
+                    if (i >= 50) break;
+                    if (group.closed) continue;
+                    const name_w = std.unicode.utf8ToUtf16LeAllocZ(app.core_app.alloc, group.name) catch continue;
+                    defer app.core_app.alloc.free(name_w);
+                    _ = sys.AppendMenuW(group_menu, c.MF_STRING, c.CTX_TAB_RDP_GROUP_BASE + i, name_w.ptr);
+                }
+                _ = sys.AppendMenuW(menu, (if (live_session) c.MF_STRING else c.MF_GRAYED) | c.MF_POPUP, @intFromPtr(group_menu), std.unicode.utf8ToUtf16LeStringLiteral("Add to Group"));
+            }
+            // Its own window, which can go to another monitor; and back.
+            const alone = self.tabs.items.len < 2;
+            _ = sys.AppendMenuW(menu, if (live_session and !alone) c.MF_STRING else c.MF_GRAYED, c.CTX_TAB_RDP_DETACH, std.unicode.utf8ToUtf16LeStringLiteral("Detach to New Window"));
+            if (tab_surface) |surface| if (surface.rdp_dock_host != null and app.dockTarget(surface) != null) {
+                _ = sys.AppendMenuW(menu, if (live_session) c.MF_STRING else c.MF_GRAYED, c.CTX_TAB_RDP_DOCK, std.unicode.utf8ToUtf16LeStringLiteral("Dock to Main Window"));
+            };
+        }
+        if (group_tab) |group| {
+            const colors = group.colors;
+            const check = struct {
+                fn of(on: bool) UINT {
+                    return c.MF_STRING | if (on) c.MF_CHECKED else 0;
+                }
+            }.of;
+            _ = sys.AppendMenuW(menu, check(colors == .c8), c.CTX_GROUP_COLORS_8, std.unicode.utf8ToUtf16LeStringLiteral("Colors: 256 (lightest)"));
+            _ = sys.AppendMenuW(menu, check(colors == .c16), c.CTX_GROUP_COLORS_16, std.unicode.utf8ToUtf16LeStringLiteral("Colors: 65 thousand"));
+            _ = sys.AppendMenuW(menu, check(colors == .c24), c.CTX_GROUP_COLORS_24, std.unicode.utf8ToUtf16LeStringLiteral("Colors: 16 million"));
+            _ = sys.AppendMenuW(menu, c.MF_SEPARATOR, 0, null);
+            _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_GROUP_SAVE, std.unicode.utf8ToUtf16LeStringLiteral("Save Group"));
+            _ = sys.AppendMenuW(menu, if (group.members.items.len != 0) c.MF_STRING else c.MF_GRAYED, c.CTX_GROUP_UNGROUP_ALL, std.unicode.utf8ToUtf16LeStringLiteral("Ungroup All"));
         }
         _ = sys.AppendMenuW(menu, c.MF_SEPARATOR, 0, null);
         _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_TAB_MOVE_LEFT, std.unicode.utf8ToUtf16LeStringLiteral("Move Tab Left"));
@@ -8032,6 +8081,14 @@ pub const Host = struct {
             // The tabs may have moved while the menu was up: find ours again.
             const index = live.findTabIndexById(tab_id) orelse return true;
             const surface = live.tabs.items[index].focusedSurface() orelse return true;
+            const picked: usize = @intCast(cmd);
+            if (picked >= c.CTX_TAB_RDP_GROUP_BASE and picked < c.CTX_TAB_RDP_GROUP_BASE + 50) {
+                const open_groups = rdp_group.groups();
+                const at = picked - c.CTX_TAB_RDP_GROUP_BASE;
+                // This tab closes: the Host may be gone after it.
+                if (at < open_groups.len) surface.addToRdpGroup(open_groups[at]);
+                return true;
+            }
             if (surface.core_initialized) switch (@as(usize, @intCast(cmd))) {
                 c.CTX_TAB_RENAME => {
                     runUiActionOrLog("tab context rename failed", surface.promptTitle(.tab));
@@ -8045,6 +8102,35 @@ pub const Host = struct {
                     surface.openRdpCommandDialog();
                     return true;
                 },
+                c.CTX_TAB_RDP_DETACH => {
+                    // This tab closes: the Host may be gone after it.
+                    live.app.detachRdpTab(surface) catch |err| {
+                        log.warn("rdp detach failed err={}", .{err});
+                    };
+                    return true;
+                },
+                c.CTX_TAB_RDP_DOCK => {
+                    // This tab (and its window, when it is the only one)
+                    // closes: the Host may be gone after it.
+                    live.app.dockRdpTab(surface) catch |err| {
+                        log.warn("rdp dock failed err={}", .{err});
+                    };
+                    return true;
+                },
+                c.CTX_TAB_RDP_GROUP_NEW => {
+                    // This tab closes: the Host may be gone after it.
+                    surface.addToRdpGroup(null);
+                    return true;
+                },
+                c.CTX_GROUP_COLORS_8, c.CTX_GROUP_COLORS_16, c.CTX_GROUP_COLORS_24 => if (surface.rdp_group) |group| {
+                    group.setColors(switch (@as(usize, @intCast(cmd))) {
+                        c.CTX_GROUP_COLORS_8 => .c8,
+                        c.CTX_GROUP_COLORS_16 => .c16,
+                        else => .c24,
+                    });
+                },
+                c.CTX_GROUP_SAVE => surface.saveRdpGroup(),
+                c.CTX_GROUP_UNGROUP_ALL => if (surface.rdp_group) |group| group.releaseAll(),
                 c.CTX_TAB_CLOSE => {
                     if (tabCloseAction(live.tabs.items.len) == .close_window) {
                         live.close();
@@ -8207,8 +8293,13 @@ pub const Host = struct {
         var admin_count: usize = 0;
         if (self.shownProfiles()) |profiles| {
             var terminals: usize = 0;
+            // Only the favorites (`profile-favorite`) are listed at the top;
+            // with none, every profile is, as before. Run as administrator
+            // and Remote Desktop keep listing them all.
+            const favorites = self.app.config.@"profile-favorite".list.items;
             for (profiles, 0..) |*profile, i| {
                 if (i >= 100) break;
+                const listed = favorites.len == 0 or isFavoriteProfile(profiles, favorites, profile.*);
                 const label_utf8 = buildDropdownProfileLabel(alloc, profile, i) catch continue;
                 defer alloc.free(label_utf8);
                 const label_w = std.unicode.utf8ToUtf16LeAllocZ(alloc, label_utf8) catch continue;
@@ -8216,12 +8307,19 @@ pub const Host = struct {
                 if (profileIsRdp(profile)) {
                     _ = sys.AppendMenuW(rdp_menu, c.MF_STRING, c.CTX_PROFILE_BASE + i, label_w.ptr);
                     rdp_count += 1;
+                    // A favorite connection is listed at the top too.
+                    if (favorites.len != 0 and listed) {
+                        _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_PROFILE_BASE + i, label_w.ptr);
+                        terminals += 1;
+                    }
                     continue;
                 }
-                const is_selected = selected_idx != null and selected_idx.? == i;
-                const flags: UINT = if (is_selected) c.MF_STRING | c.MF_CHECKED else c.MF_STRING;
-                _ = sys.AppendMenuW(menu, flags, c.CTX_PROFILE_BASE + i, label_w.ptr);
-                terminals += 1;
+                if (listed) {
+                    const is_selected = selected_idx != null and selected_idx.? == i;
+                    const flags: UINT = if (is_selected) c.MF_STRING | c.MF_CHECKED else c.MF_STRING;
+                    _ = sys.AppendMenuW(menu, flags, c.CTX_PROFILE_BASE + i, label_w.ptr);
+                    terminals += 1;
+                }
                 const plain_w = std.unicode.utf8ToUtf16LeAllocZ(alloc, profile.label) catch continue;
                 defer alloc.free(plain_w);
                 _ = sys.AppendMenuW(admin_menu, c.MF_STRING, c.CTX_ELEVATED_BASE + i, plain_w.ptr);
@@ -8237,6 +8335,25 @@ pub const Host = struct {
         // Always offered: with no Remote Desktop profile yet, its only item
         // imports them.
         if (rdp_count > 0) _ = sys.AppendMenuW(rdp_menu, c.MF_SEPARATOR, 0, null);
+        // Saved groups (`rdp_group.zig`): each opens with all its sessions.
+        if (self.savedRdpGroups(alloc)) |saved_text| {
+            defer alloc.free(saved_text);
+            var lines = std.mem.splitScalar(u8, saved_text, '\n');
+            var line_index: usize = 0;
+            var listed: usize = 0;
+            while (lines.next()) |line| : (line_index += 1) {
+                if (line_index >= 50) break;
+                var ids: [64][]const u8 = undefined;
+                const saved = rdp_group.parseSaved(line, &ids) orelse continue;
+                const label = std.fmt.allocPrint(alloc, "Open Group: {s} ({d})", .{ saved.name, saved.ids.len }) catch continue;
+                defer alloc.free(label);
+                const label_w = std.unicode.utf8ToUtf16LeAllocZ(alloc, label) catch continue;
+                defer alloc.free(label_w);
+                _ = sys.AppendMenuW(rdp_menu, c.MF_STRING, c.CTX_RDP_SAVED_GROUP_BASE + line_index, label_w.ptr);
+                listed += 1;
+            }
+            if (listed > 0) _ = sys.AppendMenuW(rdp_menu, c.MF_SEPARATOR, 0, null);
+        }
         _ = sys.AppendMenuW(rdp_menu, c.MF_STRING, c.CTX_EDIT_CONNECTIONS, std.unicode.utf8ToUtf16LeStringLiteral("Edit connections..."));
         _ = sys.AppendMenuW(rdp_menu, c.MF_STRING, c.CTX_IMPORT_TERMINALS, std.unicode.utf8ToUtf16LeStringLiteral("Import from Terminals..."));
         _ = sys.AppendMenuW(menu, c.MF_POPUP, @intFromPtr(rdp_menu), std.unicode.utf8ToUtf16LeStringLiteral("Remote Desktop"));
@@ -8276,6 +8393,33 @@ pub const Host = struct {
         self.handleOverflowMenuCommand(cmd);
     }
 
+    /// `rdp-groups.txt`, in `alloc`, or null when there is none.
+    fn savedRdpGroups(self: *Host, alloc: Allocator) ?[]u8 {
+        const path = self.app.localAppDataPath(rdp_group.saved_file) orelse return null;
+        defer self.app.core_app.alloc.free(path);
+        return std.fs.cwd().readFileAlloc(alloc, path, 1 << 20) catch null;
+    }
+
+    /// The saved group on line `line_index` of `rdp-groups.txt`, opened in a
+    /// new tab with every session.
+    fn openSavedRdpGroup(self: *Host, line_index: usize) void {
+        const alloc = self.app.core_app.alloc;
+        const source = self.activeSurface() orelse return;
+        const text = self.savedRdpGroups(alloc) orelse return;
+        defer alloc.free(text);
+        var lines = std.mem.splitScalar(u8, text, '\n');
+        var at: usize = 0;
+        while (lines.next()) |line| : (at += 1) {
+            if (at != line_index) continue;
+            var ids: [64][]const u8 = undefined;
+            const saved = rdp_group.parseSaved(line, &ids) orelse return;
+            _ = self.app.openRdpGroupTab(source, .{ .name = saved.name, .colors = saved.colors, .saved_ids = saved.ids }) catch |err| {
+                log.warn("saved rdp group could not open err={}", .{err});
+            };
+            return;
+        }
+    }
+
     fn handleOverflowMenuCommand(self: *Host, cmd: BOOL) void {
         if (cmd <= 0) return;
         const cmd_id = @as(usize, @intCast(cmd));
@@ -8289,6 +8433,12 @@ pub const Host = struct {
                     _ = self.quickOpenProfileIndex(profile_index, .tab);
                 }
             }
+            return;
+        }
+
+        // A saved group of Remote Desktop sessions, in a new tab.
+        if (cmd_id >= c.CTX_RDP_SAVED_GROUP_BASE and cmd_id < c.CTX_RDP_SAVED_GROUP_BASE + 50) {
+            self.openSavedRdpGroup(cmd_id - c.CTX_RDP_SAVED_GROUP_BASE);
             return;
         }
 
@@ -8841,11 +8991,23 @@ pub const Host = struct {
         else
             null;
         const tab_color: ?u32 = if (tab_surface != null and !disabled and !is_hc) tab_surface.?.tabColor() else null;
+        // The active tab: an accent bar across its top, so the tab in
+        // front reads at a glance when the terminal's background is close
+        // to the strip's. A profile's color stripe goes just under it.
+        const accent_bar = tab_button and active and !disabled and !is_hc and !overlay;
+        const accent_h = self.scaled(3);
+        if (accent_bar) fillSolidRect(draw.hDC, .{
+            .left = draw.rcItem.left + 1,
+            .top = draw.rcItem.top + content_top_inset,
+            .right = draw.rcItem.right - 1,
+            .bottom = draw.rcItem.top + content_top_inset + accent_h,
+        }, if (self.window_active) theme.accent else adjustColor(theme.accent, -40, -40, -40));
+        const stripe_top = draw.rcItem.top + content_top_inset + if (accent_bar) accent_h + self.scaled(1) else self.scaled(1);
         if (tab_color) |color| fillSolidRect(draw.hDC, .{
             .left = draw.rcItem.left + self.scaled(4),
-            .top = draw.rcItem.top + content_top_inset + self.scaled(1),
+            .top = stripe_top,
             .right = draw.rcItem.right - self.scaled(4),
-            .bottom = draw.rcItem.top + content_top_inset + self.scaled(4),
+            .bottom = stripe_top + self.scaled(3),
         }, color);
         if (tab_color == null and tab_button and !overlay and !disabled and hovered and !active) {
             fillSolidRect(draw.hDC, .{

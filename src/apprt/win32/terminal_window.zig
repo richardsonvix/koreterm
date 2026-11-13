@@ -168,6 +168,7 @@ const windows = win32.windows;
 const windows_shell = @import("../../config/windows_shell.zig");
 const tab_style = @import("tab_style.zig");
 const rdp_pane_mod = @import("rdp_pane.zig");
+const rdp_group_mod = @import("rdp_group.zig");
 const rdp_command_dialog = @import("rdp_command_dialog.zig");
 const profile_credentials = @import("profile_credentials.zig");
 const writeImeWindowFormsTrace = win32.writeImeWindowFormsTrace;
@@ -438,6 +439,14 @@ pub const Surface = struct {
     /// command), which lives as long as the surface.
     rdp_pane: ?*rdp_pane_mod.Pane = null,
     rdp_config: ?configpkg.Config = null,
+    /// A group of Remote Desktop sessions covering the pane
+    /// (`rdp_group.zig`): the tab watches them in a grid, over the same
+    /// placeholder shell (`rdp_config`).
+    rdp_group: ?*rdp_group_mod.Group = null,
+    /// This Remote Desktop tab was detached into a window of its own from
+    /// the window with this id: its tab menu offers Dock back into it
+    /// (`App.dockRdpTab`).
+    rdp_dock_host: ?u32 = null,
     /// Ctrl+Alt+Home gave the keyboard back to koreterm: the pane keeps the
     /// focus instead of handing it to the session.
     rdp_released: bool = false,
@@ -933,7 +942,10 @@ pub const Surface = struct {
         // pane: the core runs a placeholder shell under the control.
         var rdp_line_buf: [1024]u8 = undefined;
         const rdp_target = self.rdpTarget(&rdp_line_buf);
-        const core_config: *const configpkg.Config = if (rdp_target != null) placeholder: {
+        // A session handed over from a group, or a group, runs the same
+        // placeholder under its window.
+        const rdp_like = rdp_target != null or opts.adopt_rdp != null or opts.rdp_group != null;
+        const core_config: *const configpkg.Config = if (rdp_like) placeholder: {
             self.rdp_config = try config.clone(app.core_app.alloc);
             const cloned = &self.rdp_config.?;
             cloned.command = .{ .direct = &rdp_pane_mod.placeholder_argv };
@@ -954,7 +966,11 @@ pub const Surface = struct {
                 self,
             );
             self.core_initialized = true;
-            if (rdp_target) |target| self.openRdpPane(config, target);
+            if (opts.adopt_rdp) |pane| {
+                self.adoptRdpPane(pane, opts.adopt_rdp_label);
+            } else if (opts.rdp_group) |start| {
+                self.openRdpGroup(config, start);
+            } else if (rdp_target) |target| self.openRdpPane(config, target);
             log.debug("surface.init core surface initialized", .{});
             // A pane made behind its tab's focus (a restored layout) was
             // marked dimmed before it had a renderer to tell.
@@ -4138,13 +4154,18 @@ pub const Surface = struct {
         }
         var rect: RECT = undefined;
         if (sys.GetClientRect(hwnd, &rect) == 0) rect = .{ .left = 0, .top = 0, .right = 800, .bottom = 600 };
-        // The connection's own quality settings, else the config's.
-        const own = target.rdp;
         self.rdp_pane = rdp_pane_mod.Pane.create(alloc, hwnd, target, .{
             .profile_id = profile_id,
             .user = if (kept) |entry| entry.user else target.user,
             .password = if (kept) |entry| entry.password else null,
-        }, rect.right, rect.bottom, .{
+        }, rect.right, rect.bottom, rdpOptions(config, target), self.rdpEvents());
+        if (self.rdp_pane == null) self.showRdpNotice("Remote Desktop could not start: this Windows has no Remote Desktop control koreterm can host.");
+    }
+
+    /// A connection's own quality settings, else the config's.
+    fn rdpOptions(config: *const configpkg.Config, target: rdp_pane_mod.Target) rdp_pane_mod.Options {
+        const own = target.rdp;
+        return .{
             .colors = if (own.colors) |colors| @intFromEnum(colors) else config.@"rdp-color-depth".bits(),
             .compression = own.compression orelse config.@"rdp-compression",
             .experience = own.experience orelse switch (config.@"rdp-experience") {
@@ -4157,14 +4178,178 @@ pub const Surface = struct {
                 .fill => .fill,
             },
             .trust_certificates = own.trust_certificates orelse config.@"rdp-trust-certificates",
-        }, .{
+        };
+    }
+
+    fn rdpEvents(self: *Surface) rdp_pane_mod.Events {
+        return .{
             .ctx = self,
             .ended = &rdpEnded,
             .released = &rdpReleased,
             .connected = &rdpConnected,
             .sent = &rdpSent,
-        });
-        if (self.rdp_pane == null) self.showRdpNotice("Remote Desktop could not start: this Windows has no Remote Desktop control koreterm can host.");
+        };
+    }
+
+    /// Cover the pane with a session that is already open (it left a
+    /// group), named `label`: no new connection.
+    fn adoptRdpPane(self: *Surface, pane: *rdp_pane_mod.Pane, label: []const u8) void {
+        const hwnd = self.hwnd orelse return pane.destroy();
+        pane.reparent(hwnd, self.rdpEvents());
+        pane.setInteractive(true);
+        self.rdp_pane = pane;
+        if (label.len != 0) self.setTabTitleOverride(label) catch |err| log.warn("rdp tab title failed err={}", .{err});
+        var rect: RECT = undefined;
+        if (sys.GetClientRect(hwnd, &rect) != 0) pane.resize(rect.right, rect.bottom);
+    }
+
+    /// The tab's hover hint for a Remote Desktop session: its title, server
+    /// and port, and the user it signs in as; for a group's tab, how many
+    /// sessions it watches. Null for any other tab. In `alloc`. Never the
+    /// password.
+    pub fn rdpHint(self: *Surface, alloc: std.mem.Allocator) ?[]u8 {
+        const title = self.effectiveTitle() orelse "Remote Desktop";
+        if (self.rdp_group) |group| {
+            const count = group.members.items.len;
+            return std.fmt.allocPrint(alloc, "{s}  |  {d} Remote Desktop session{s} watched", .{ title, count, if (count == 1) "" else "s" }) catch null;
+        }
+        const pane = self.rdp_pane orelse return null;
+        const login = pane.remoting();
+        return std.fmt.allocPrint(alloc, "{s}  |  Server {s}:{d}  |  User {s}{s}", .{
+            title,
+            login.server,
+            pane.port,
+            if (login.user.len != 0) login.user else "(Windows asks)",
+            if (pane.isConnected()) "" else "  |  not connected",
+        }) catch null;
+    }
+
+    /// The session out of this tab (it goes into a group): the tab is left
+    /// with its placeholder shell, and is closed by the caller.
+    pub fn takeRdpPane(self: *Surface) ?*rdp_pane_mod.Pane {
+        const pane = self.rdp_pane orelse return null;
+        self.rdp_pane = null;
+        self.rdp_released = false;
+        return pane;
+    }
+
+    /// Show a group in this tab: empty, or a saved one, whose sessions are
+    /// opened from their profiles in `config`.
+    fn openRdpGroup(self: *Surface, config: *const configpkg.Config, start: rdp_group_mod.Start) void {
+        const hwnd = self.hwnd orelse return;
+        const alloc = self.app.core_app.alloc;
+        const group = rdp_group_mod.Group.create(alloc, hwnd, .{ .ctx = self, .release = &rdpGroupRelease }, start.name) catch |err| {
+            log.warn("rdp group could not be made err={}", .{err});
+            return self.showRdpNotice("The group could not be shown.");
+        };
+        group.colors = start.colors;
+        self.rdp_group = group;
+        self.setTabTitleOverride(group.name) catch |err| log.warn("rdp group title failed err={}", .{err});
+        var missing: usize = 0;
+        for (start.saved_ids) |id| {
+            const command = config.@"profile-command".get(id) orelse {
+                missing += 1;
+                continue;
+            };
+            const target = rdp_pane_mod.targetOf(command) orelse {
+                missing += 1;
+                continue;
+            };
+            const label = config.@"profile-name".get(id) orelse id;
+            var kept = profile_credentials.readEntry(alloc, id) catch null;
+            defer if (kept) |*entry| entry.deinit(alloc);
+            var make: SavedMember = .{
+                .alloc = alloc,
+                .target = target,
+                .login = .{
+                    .profile_id = id,
+                    .user = if (kept) |entry| entry.user else target.user,
+                    .password = if (kept) |entry| entry.password else null,
+                },
+            };
+            group.addNew(label, rdpOptions(config, target), &SavedMember.make, &make) catch {
+                missing += 1;
+            };
+        }
+        if (missing != 0) self.showRdpNotice("Some connections of the saved group are no longer profiles, or could not open.");
+    }
+
+    const SavedMember = struct {
+        alloc: std.mem.Allocator,
+        target: rdp_pane_mod.Target,
+        login: rdp_pane_mod.Login,
+
+        fn make(ctx: *anyopaque, parent: HWND, width: i32, height: i32, options: rdp_pane_mod.Options, events: rdp_pane_mod.Events) ?*rdp_pane_mod.Pane {
+            const self: *SavedMember = @ptrCast(@alignCast(ctx));
+            return rdp_pane_mod.Pane.create(self.alloc, parent, self.target, self.login, width, height, options, events);
+        }
+    };
+
+    /// A session leaves this tab's group: it opens in a tab of its own.
+    fn rdpGroupRelease(ctx: *anyopaque, pane: *rdp_pane_mod.Pane, label: []const u8) void {
+        const self: *Surface = @ptrCast(@alignCast(ctx));
+        self.app.openAdoptedRdpTab(self, pane, label) catch |err| {
+            log.warn("rdp group: the session could not get a tab of its own err={}", .{err});
+            pane.destroy();
+        };
+    }
+
+    /// The group tab menu's Save Group: its line in `rdp-groups.txt`
+    /// (`rdp_group.savedLine`), which the new-tab menu's Remote Desktop
+    /// lists to open it again with every session.
+    pub fn saveRdpGroup(self: *Surface) void {
+        const group = self.rdp_group orelse return;
+        const alloc = self.app.core_app.alloc;
+        const line = (rdp_group_mod.savedLine(alloc, group) catch null) orelse
+            return self.showRdpNotice("Nothing to save: only sessions opened from a profile can be opened again, and this group has none.");
+        defer alloc.free(line);
+        const path = self.app.localAppDataPath(rdp_group_mod.saved_file) orelse return self.showRdpNotice("The group could not be saved: no folder for it.");
+        defer alloc.free(path);
+        const old = std.fs.cwd().readFileAlloc(alloc, path, 1 << 20) catch |err| switch (err) {
+            error.FileNotFound => alloc.dupe(u8, "") catch return,
+            else => return self.showRdpNotice("The group could not be saved: its file could not be read."),
+        };
+        defer alloc.free(old);
+        const text = rdp_group_mod.replaceSaved(alloc, old, line) catch return;
+        defer alloc.free(text);
+        const file = std.fs.createFileAbsolute(path, .{ .truncate = true }) catch
+            return self.showRdpNotice("The group could not be saved: its file could not be written.");
+        defer file.close();
+        file.writeAll(text) catch return self.showRdpNotice("The group could not be saved: its file could not be written.");
+        self.showRdpNotice("Group saved. Open it again from the new-tab menu (the arrow beside +), Remote Desktop.");
+    }
+
+    /// Every session of this tab's group goes back to a tab of its own (the
+    /// tab is closing). True when there was a group.
+    pub fn releaseRdpGroup(self: *Surface) bool {
+        const group = self.rdp_group orelse return false;
+        group.releaseAll();
+        group.closed = true;
+        return true;
+    }
+
+    /// The tab menu's Add to Group: this tab's session goes into `group`, or
+    /// a new group's tab, and this tab closes. `self` may be gone after.
+    pub fn addToRdpGroup(self: *Surface, group_in: ?*rdp_group_mod.Group) void {
+        const pane = self.rdp_pane orelse return self.showRdpNotice("This tab has no Remote Desktop session open.");
+        const alloc = self.app.core_app.alloc;
+        const label = alloc.dupe(u8, self.effectiveTitle() orelse "Remote Desktop") catch return;
+        defer alloc.free(label);
+        const group = group_in orelse made: {
+            const surface = self.app.openRdpGroupTab(self, .{}) catch |err| {
+                log.warn("rdp group tab could not open err={}", .{err});
+                return self.showRdpNotice("The group could not be opened.");
+            };
+            break :made surface.rdp_group orelse return self.showRdpNotice("The group could not be shown.");
+        };
+        // Still in the group list (a menu can outlive one).
+        const listed = for (rdp_group_mod.groups()) |other| {
+            if (other == group) break true;
+        } else false;
+        if (!listed or group.closed) return self.showRdpNotice("That group is closed.");
+        group.add(pane, label, pane.options) catch return self.showRdpNotice("The session could not join the group.");
+        _ = self.takeRdpPane();
+        self.app.closeRdpTabAfterGroup(self);
     }
 
     /// The Remote Desktop session is over and its control gone: the pane
@@ -4264,11 +4449,11 @@ pub const Surface = struct {
 
     /// The pane's client area changed: the Remote Desktop control follows.
     pub fn resizeRdpPane(self: *Surface) void {
-        const pane = self.rdp_pane orelse return;
         const hwnd = self.hwnd orelse return;
         var rect: RECT = undefined;
         if (sys.GetClientRect(hwnd, &rect) == 0) return;
-        pane.resize(rect.right, rect.bottom);
+        if (self.rdp_pane) |pane| pane.resize(rect.right, rect.bottom);
+        if (self.rdp_group) |group| group.resize(rect.right, rect.bottom);
     }
 
     /// The pane took the keyboard focus: a Remote Desktop session takes it,
@@ -4789,10 +4974,15 @@ pub const Surface = struct {
         self.destroy_on_wm_destroy = false;
         self.deferred_char.clear();
         self.closeQuickSelect(false);
-        // The Remote Desktop session ends with its pane.
+        // The Remote Desktop session ends with its pane, and a group's
+        // sessions with its tab (a closing tab lets them go first).
         if (self.rdp_pane) |pane| {
             self.rdp_pane = null;
             pane.destroy();
+        }
+        if (self.rdp_group) |group| {
+            self.rdp_group = null;
+            group.destroy();
         }
         if (self.tab_icon) |icon| {
             self.tab_icon = null;

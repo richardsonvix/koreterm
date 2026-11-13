@@ -1,8 +1,10 @@
 //! The modal window that edits one Remote Desktop connection of the
 //! Profiles page: its name, server, port, user name, password and its own
 //! quality settings (`terminals_import.RdpOptions`, each "Default" to take
-//! the config's). Settings writes what it returns into the draft and keeps
-//! the login apart from the config (`profile_credentials`).
+//! the config's) and its notes. Settings writes what it returns into the
+//! draft (the notes as the profile's `windows_shell.notes_env`, as every
+//! profile keeps them) and keeps the login apart from the config
+//! (`profile_credentials`).
 //!
 //! Nothing here logs a value the person typed.
 const std = @import("std");
@@ -10,6 +12,7 @@ const Allocator = std.mem.Allocator;
 
 const win32_types = @import("../win32_types.zig");
 const terminals_import = @import("terminals_import.zig");
+const profile_dialog = @import("profile_dialog.zig");
 
 const BOOL = win32_types.BOOL;
 const HINSTANCE = win32_types.HINSTANCE;
@@ -36,6 +39,10 @@ pub const Connection = struct {
     /// keeps it.
     has_password: bool = false,
     options: terminals_import.RdpOptions = .{},
+    /// Free text, any number of lines; empty for none.
+    notes: []const u8 = "",
+    /// Listed in the new-tab menu (`profile-favorite`).
+    favorite: bool = false,
 };
 
 extern "user32" fn DialogBoxIndirectParamW(hInstance: ?HINSTANCE, template: *const anyopaque, parent: ?HWND, proc: *const fn (HWND, UINT, WPARAM, LPARAM) callconv(.winapi) isize, init: LPARAM) callconv(.winapi) isize;
@@ -62,6 +69,10 @@ const id_compression: u16 = 116;
 const id_experience: u16 = 117;
 const id_password_note: u16 = 118;
 const id_certificates: u16 = 119;
+const id_notes: u16 = 120;
+const id_favorite: u16 = 121;
+const BM_GETCHECK: UINT = 0x00F0;
+const BM_SETCHECK: UINT = 0x00F1;
 
 const DWLP_USER: i32 = @sizeOf(usize) * 2;
 const WM_INITDIALOG: UINT = 0x0110;
@@ -136,6 +147,9 @@ fn buildTemplate(alloc: Allocator) Allocator.Error![]align(4) u8 {
     const WS_VSCROLL: u32 = 0x00200000;
     const child = WS_CHILD | WS_VISIBLE;
     const ES_AUTOHSCROLL: u32 = 0x80;
+    const ES_MULTILINE: u32 = 0x4;
+    const ES_AUTOVSCROLL: u32 = 0x40;
+    const ES_WANTRETURN: u32 = 0x1000;
     const ES_NUMBER: u32 = 0x2000;
     const ES_PASSWORD: u32 = 0x20;
     const CBS_DROPDOWNLIST: u32 = 0x3;
@@ -146,11 +160,11 @@ fn buildTemplate(alloc: Allocator) Allocator.Error![]align(4) u8 {
     const combo: u16 = 0x0085;
 
     const w: i16 = 280;
-    const h: i16 = 232;
+    const h: i16 = 278;
     const label_w: i16 = 86;
     const field_x: i16 = 7 + label_w + 4;
     const field_w: i16 = w - field_x - 7;
-    const count: u16 = 9 * 2 + 1 + 2;
+    const count: u16 = 9 * 2 + 1 + 2 + 2 + 1;
     try t.int(u32, 0x80000000 | 0x00C00000 | 0x00080000 | 0x80 | 0x40 | 0x800); // popup, caption, sysmenu, modal frame, setfont, center
     try t.int(u32, 0);
     try t.int(u16, count);
@@ -189,6 +203,9 @@ fn buildTemplate(alloc: Allocator) Allocator.Error![]align(4) u8 {
         try t.item(style, field_x, y, if (row.kind == .number) 50 else field_w, field_h, row.id, if (row.kind == .choice) combo else edit_atom, L(""));
         y += if (row.kind == .password) 26 else 18;
     }
+    try t.item(child, 7, y + 2, label_w, 9, 0xFFFF, static, L("No&tes"));
+    try t.item(child | WS_TABSTOP | WS_GROUP | WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN, field_x, y, field_w, 52, id_notes, edit_atom, L(""));
+    try t.item(child | WS_TABSTOP | WS_GROUP | 0x3, field_x, y + 56, field_w, 12, id_favorite, button, L("★ Favo&rite: listed in the new-tab menu"));
     // Under the password field: what leaving it blank does.
     try t.item(child, field_x, 9 + 18 * 4 + 14, field_w, 9, id_password_note, static, L(""));
     try t.item(child | WS_TABSTOP | WS_GROUP | BS_DEFPUSHBUTTON, w - 7 - 50 - 4 - 50, h - 21, 50, 14, IDOK, button, L("OK"));
@@ -266,6 +283,8 @@ fn dialogProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(.w
             fillCombo(hwnd, id_compression, &compression_labels, indexOf(?bool, &compression_values, conn.options.compression));
             fillCombo(hwnd, id_experience, &experience_labels, indexOf(?terminals_import.Experience, &experience_values, conn.options.experience));
             fillCombo(hwnd, id_certificates, &certificate_labels, indexOf(?bool, &certificate_values, conn.options.trust_certificates));
+            profile_dialog.setText(hwnd, id_notes, a, conn.notes);
+            if (GetDlgItem(hwnd, id_favorite)) |box| _ = SendMessageW(box, BM_SETCHECK, @intFromBool(conn.favorite), 0);
             return 1;
         },
         WM_COMMAND => {
@@ -291,6 +310,7 @@ fn dialogProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(.w
                         return 1;
                     }
                     const user = readText(hwnd, id_user, a) orelse return 1;
+                    const notes = profile_dialog.readText(hwnd, id_notes, a) orelse return 1;
                     const password_control = GetDlgItem(hwnd, id_password);
                     var password: ?[]const u8 = null;
                     if (password_control) |control| {
@@ -312,6 +332,8 @@ fn dialogProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(.w
                             .experience = experience_values[@min(comboIndex(hwnd, id_experience), experience_values.len - 1)],
                             .trust_certificates = certificate_values[@min(comboIndex(hwnd, id_certificates), certificate_values.len - 1)],
                         },
+                        .notes = notes,
+                        .favorite = if (GetDlgItem(hwnd, id_favorite)) |box| SendMessageW(box, BM_GETCHECK, 0, 0) == 1 else false,
                     };
                     _ = EndDialog(hwnd, IDOK);
                     return 1;
@@ -335,5 +357,5 @@ test "rdp connection dialog: the template is DWORD aligned and counts its items"
     const template = try buildTemplate(std.testing.allocator);
     defer std.testing.allocator.free(template);
     try std.testing.expectEqual(@as(usize, 0), @intFromPtr(template.ptr) % 4);
-    try std.testing.expectEqual(@as(u16, 9 * 2 + 1 + 2), std.mem.readInt(u16, template[8..10], .little));
+    try std.testing.expectEqual(@as(u16, 9 * 2 + 1 + 2 + 2 + 1), std.mem.readInt(u16, template[8..10], .little));
 }

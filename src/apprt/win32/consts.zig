@@ -433,6 +433,24 @@ pub const CTX_TAB_NEW_PROFILE: usize = 4025;
 /// A Remote Desktop tab's "Run Command on Remote Desktop..."
 /// (`rdp_command_dialog.zig`).
 pub const CTX_TAB_RDP_COMMAND: usize = 4027;
+/// A Remote Desktop tab's Add to Group > New Group (`rdp_group.zig`);
+/// an existing group is CTX_TAB_RDP_GROUP_BASE + its index in
+/// `rdp_group.groups()`.
+pub const CTX_TAB_RDP_GROUP_NEW: usize = 4030;
+pub const CTX_TAB_RDP_GROUP_BASE: usize = 4500;
+/// A group tab's menu: its colors, Save Group, Ungroup All.
+pub const CTX_GROUP_COLORS_8: usize = 4031;
+pub const CTX_GROUP_COLORS_16: usize = 4032;
+pub const CTX_GROUP_COLORS_24: usize = 4033;
+pub const CTX_GROUP_SAVE: usize = 4034;
+pub const CTX_GROUP_UNGROUP_ALL: usize = 4035;
+/// A Remote Desktop tab's Detach to New Window and, once detached, Dock
+/// (`App.detachRdpTab`, `App.dockRdpTab`).
+pub const CTX_TAB_RDP_DETACH: usize = 4036;
+pub const CTX_TAB_RDP_DOCK: usize = 4037;
+/// The new-tab menu's Remote Desktop > saved groups: CTX_RDP_SAVED_GROUP_BASE
+/// + the line's index in `rdp-groups.txt`.
+pub const CTX_RDP_SAVED_GROUP_BASE: usize = 4600;
 pub const CTX_PROFILE_BASE: usize = 4100; // profile dropdown items: CTX_PROFILE_BASE + index
 pub const CTX_SETTINGS: usize = 4013;
 pub const CTX_ABOUT: usize = 4014;

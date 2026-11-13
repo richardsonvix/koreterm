@@ -1,3 +1,30 @@
+koreterm 1.3.144
+
+- Remote Desktop groups: right-click a Remote Desktop tab, Add to Group,
+  New Group (or a group already open). The group's tab shows its sessions
+  together in a square grid that fills it: 2 x 2 to start, 3 x 3 when a
+  fifth joins, 4 x 4 at the tenth; free cells say so. Each session is
+  under a strip with its name, Interact and Ungroup. The sessions are
+  watch only until Interact (Ctrl+Alt+Home or Watch only gives them back);
+  Ungroup puts a session back in a tab of its own, still connected, with
+  its connection's own settings. Closing the group's tab puts every session
+  back in its own tab: none is closed.
+- A group is light: no sound, the fastest visual quality, compression on,
+  and each remote desktop the size of its cell. Its tab's menu chooses the
+  colors (256, 65 thousand or 16 million). koreterm measures its own CPU
+  use every few seconds and, with more sessions or more load, shrinks the
+  remote desktops and lowers the colors on its own; the header of the grid
+  says what it chose.
+- Save Group (the group tab's menu) keeps the group; the new-tab menu's
+  Remote Desktop opens it again with all its sessions.
+- Detach to New Window (a Remote Desktop tab's menu): the session moves,
+  still connected, into a koreterm window of its own, with its tab strip,
+  to put on another monitor. Its tab's menu then has Dock to Main Window,
+  which moves it back, also without reconnecting.
+- Hovering over a Remote Desktop tab shows its server and port and the
+  user it signs in as; over a group's tab, how many sessions it watches.
+- The tab in front has an accent bar along its top.
+
 koreterm 1.3.143
 
 - Remote Desktop tabs: right-click the tab, "Run Command on Remote
@@ -9,6 +36,23 @@ koreterm 1.3.143
   asked about first.
 - An applied update.zip is deleted, also when it was still in use while
   the update ran.
+- Favorites: mark a profile with the star (Favorite) in its window, or
+  with Favorite in the Profiles list's menu. Once any profile is a
+  favorite, the new-tab menu (the arrow beside +) lists only the
+  favorites; with none, it lists every profile as before. Run as
+  administrator and Remote Desktop still list them all, and a favorite
+  connection is listed at the top too.
+- Notes for every kind of profile: Remote Desktop connections have Notes
+  in their window, and the profiles koreterm finds (PowerShell, Command
+  Prompt, WSL, SSH hosts) open a window with Favorite and Notes on Enter.
+  A new profile based on one of them takes its notes along.
+- Opening koreterm again (a shortcut, the Start menu, the exe) no longer
+  opens another window: it brings the open one to the front. The jump
+  list, +new-window and a launch that names a profile or folder still
+  open a window.
+- Remote Desktop tabs fit the window again after a move to a monitor with
+  another scale, or a resize: the session takes the tab's new size instead
+  of leaving bands of the terminal above and below it.
 
 koreterm 1.3.142
 

@@ -45,6 +45,8 @@ pub const Profile = struct {
     variables: []const u8 = "",
     /// Free text, any number of lines; empty for none.
     notes: []const u8 = "",
+    /// Listed in the new-tab menu (`profile-favorite`).
+    favorite: bool = false,
 };
 
 /// Checks the caller makes on OK: a message for the person, and the field
@@ -100,6 +102,7 @@ const id_tab_color_pick: u16 = 127;
 const id_tab_icon: u16 = 128;
 const id_tab_icon_browse: u16 = 129;
 const id_notes: u16 = 130;
+const id_favorite: u16 = 131;
 
 const DWLP_USER: i32 = @sizeOf(usize) * 2;
 const WM_INITDIALOG: UINT = 0x0110;
@@ -176,11 +179,11 @@ fn buildTemplate(alloc: Allocator) Allocator.Error![]align(4) u8 {
     const static: u16 = 0x0082;
 
     const w: i16 = 320;
-    const h: i16 = 302;
+    const h: i16 = 318;
     const label_w: i16 = 86;
     const field_x: i16 = 7 + label_w + 4;
     const field_w: i16 = w - field_x - 7;
-    const count: u16 = 6 * 2 + 1 + 1 + 3 + 2 + 2 + 2 + 2;
+    const count: u16 = 6 * 2 + 1 + 1 + 3 + 2 + 2 + 2 + 2 + 1;
     try t.int(u32, 0x80000000 | 0x00C00000 | 0x00080000 | 0x80 | 0x40 | 0x800);
     try t.int(u32, 0);
     try t.int(u16, count);
@@ -216,6 +219,8 @@ fn buildTemplate(alloc: Allocator) Allocator.Error![]align(4) u8 {
     try t.item(child, field_x, 9 + 18 * 5 + 14, field_w, 9, 0xFFFF, static, L("Blank: the program's icon. A .ico/.exe/.dll file, an emoji, or none."));
     y += 10;
     try t.item(child | WS_TABSTOP | WS_GROUP | BS_AUTOCHECKBOX, field_x, y, field_w, 12, id_elevated, button, L("Open as &administrator (in its own window)"));
+    y += 16;
+    try t.item(child | WS_TABSTOP | WS_GROUP | BS_AUTOCHECKBOX, field_x, y, field_w, 12, id_favorite, button, L("★ Favo&rite: listed in the new-tab menu"));
     y += 18;
     try t.item(child, 7, y + 2, label_w, 9, 0xFFFF, static, L("&Variables"));
     try t.item(child | WS_TABSTOP | WS_GROUP | WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN, field_x, y, field_w, 60, id_variables, edit_atom, L(""));
@@ -238,7 +243,8 @@ fn stateOf(hwnd: HWND) ?*State {
 }
 
 /// `text` with every lone `\n` written as `\r\n`, for a multi-line EDIT.
-fn setText(hwnd: HWND, id: u16, alloc: Allocator, text: []const u8) void {
+/// The Remote Desktop window's Notes field uses it too.
+pub fn setText(hwnd: HWND, id: u16, alloc: Allocator, text: []const u8) void {
     const control = GetDlgItem(hwnd, id) orelse return;
     var crlf: std.ArrayListUnmanaged(u8) = .empty;
     defer crlf.deinit(alloc);
@@ -251,7 +257,9 @@ fn setText(hwnd: HWND, id: u16, alloc: Allocator, text: []const u8) void {
     _ = SetWindowTextW(control, wide.ptr);
 }
 
-fn readText(hwnd: HWND, id: u16, alloc: Allocator) ?[]u8 {
+/// The control's whole text, trimmed of spaces and line breaks, in `alloc`.
+/// The Remote Desktop window's Notes field uses it too.
+pub fn readText(hwnd: HWND, id: u16, alloc: Allocator) ?[]u8 {
     const control = GetDlgItem(hwnd, id) orelse return null;
     const len: usize = @intCast(@max(0, GetWindowTextLengthW(control)));
     const buf = alloc.alloc(u16, len + 1) catch return null;
@@ -295,6 +303,7 @@ fn dialogProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(.w
             setText(hwnd, id_variables, a, p.variables);
             setText(hwnd, id_notes, a, p.notes);
             if (GetDlgItem(hwnd, id_elevated)) |box| _ = SendMessageW(box, BM_SETCHECK, @intFromBool(p.elevated), 0);
+            if (GetDlgItem(hwnd, id_favorite)) |box| _ = SendMessageW(box, BM_SETCHECK, @intFromBool(p.favorite), 0);
             return 1;
         },
         WM_COMMAND => {
@@ -311,6 +320,7 @@ fn dialogProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(.w
                         .tab_color = readText(hwnd, id_tab_color, a) orelse return 1,
                         .tab_icon = readText(hwnd, id_tab_icon, a) orelse return 1,
                         .elevated = if (GetDlgItem(hwnd, id_elevated)) |box| SendMessageW(box, BM_GETCHECK, 0, 0) == 1 else false,
+                        .favorite = if (GetDlgItem(hwnd, id_favorite)) |box| SendMessageW(box, BM_GETCHECK, 0, 0) == 1 else false,
                         .variables = readText(hwnd, id_variables, a) orelse return 1,
                         .notes = readText(hwnd, id_notes, a) orelse return 1,
                     };
@@ -473,7 +483,7 @@ test "profile dialog: the template is DWORD aligned and counts its items" {
     const template = try buildTemplate(std.testing.allocator);
     defer std.testing.allocator.free(template);
     try std.testing.expectEqual(@as(usize, 0), @intFromPtr(template.ptr) % 4);
-    try std.testing.expectEqual(@as(u16, 25), std.mem.readInt(u16, template[8..10], .little));
+    try std.testing.expectEqual(@as(u16, 26), std.mem.readInt(u16, template[8..10], .little));
 }
 
 test "profile dialog: CHOOSECOLORW matches the SDK" {

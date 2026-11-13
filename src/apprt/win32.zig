@@ -432,6 +432,8 @@ test {
     _ = @import("win32/rdp_pane.zig");
     _ = @import("win32/rdp_command_dialog.zig");
     _ = @import("win32/rdp_connection_dialog.zig");
+    _ = @import("win32/preset_dialog.zig");
+    _ = @import("win32/rdp_group.zig");
     _ = @import("win32/profile_dialog.zig");
     _ = @import("win32/settings_backup.zig");
     _ = @import("win32/local_update.zig");
@@ -4126,6 +4128,14 @@ pub const SurfaceInitOptions = struct {
     adopted_session: ?*win32_terminal_handoff.PendingSession = null,
     /// What the surface records of its launch (`pane_launch.prepare`).
     launch: configpkg.pane_launch.Stamp = .{},
+    /// A Remote Desktop session already open (it leaves a group's grid):
+    /// the pane covers the new tab with it instead of connecting, under
+    /// `adopt_rdp_label`. The pane is the surface's from then on.
+    adopt_rdp: ?*@import("win32/rdp_pane.zig").Pane = null,
+    adopt_rdp_label: []const u8 = "",
+    /// The tab shows a group of Remote Desktop sessions
+    /// (`win32/rdp_group.zig`) instead of a terminal.
+    rdp_group: ?@import("win32/rdp_group.zig").Start = null,
 };
 
 /// The first show a handed-off console asked for in its `STARTUPINFO`.

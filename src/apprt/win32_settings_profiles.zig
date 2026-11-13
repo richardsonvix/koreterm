@@ -1171,6 +1171,8 @@ pub fn changedFieldCount(original: *const Config, draft: *const Config) usize {
     var count = profileFieldChanges(original, draft);
     if (!original.@"profile-order".equal(draft.@"profile-order")) count += 1;
     if (!original.@"profile-hidden".equal(draft.@"profile-hidden")) count += 1;
+    if (!original.@"profile-favorite".equal(draft.@"profile-favorite")) count += 1;
+    if (!original.@"profile-notes".equal(draft.@"profile-notes")) count += 1;
     return count;
 }
 
@@ -1254,12 +1256,16 @@ pub fn followFile(original: *Config, draft: *Config, replacement: *const Config,
     const follow_profiles = profileFieldChanges(original, draft) == 0;
     const follow_order = original.@"profile-order".equal(draft.@"profile-order");
     const follow_hidden = original.@"profile-hidden".equal(draft.@"profile-hidden");
-    const follows: Follows = .{ .profiles = follow_profiles, .order = follow_order, .hidden = follow_hidden };
+    const follow_favorites = original.@"profile-favorite".equal(draft.@"profile-favorite");
+    const follow_notes = original.@"profile-notes".equal(draft.@"profile-notes");
+    const follows: Follows = .{ .profiles = follow_profiles, .order = follow_order, .hidden = follow_hidden, .favorites = follow_favorites, .notes = follow_notes };
     const Next = struct {
         fresh: []const pane_launch.ProfilePlace,
         places: @FieldType(pane_launch.Ledger, "profile_places"),
         hidden: @FieldType(Config, "profile-hidden"),
         order: @FieldType(Config, "profile-order"),
+        favorites: @FieldType(Config, "profile-favorite"),
+        notes: @FieldType(Config, "profile-notes"),
         profiles: ?settings_patch.ProfileValues,
     };
     var next: [2]Next = undefined;
@@ -1278,6 +1284,8 @@ pub fn followFile(original: *Config, draft: *Config, replacement: *const Config,
             .places = places,
             .hidden = if (follow_hidden) try replacement.@"profile-hidden".clone(a) else config.@"profile-hidden",
             .order = if (follow_order) try replacement.@"profile-order".clone(a) else config.@"profile-order",
+            .favorites = if (follow_favorites) try replacement.@"profile-favorite".clone(a) else config.@"profile-favorite",
+            .notes = if (follow_notes) try replacement.@"profile-notes".clone(a) else config.@"profile-notes",
             .profiles = if (follow_profiles) .{
                 .command = try replacement.@"profile-command".clone(a),
                 .name = try replacement.@"profile-name".clone(a),
@@ -1296,6 +1304,8 @@ pub fn followFile(original: *Config, draft: *Config, replacement: *const Config,
         }
         config.@"profile-hidden" = made.hidden;
         config.@"profile-order" = made.order;
+        config.@"profile-favorite" = made.favorites;
+        config.@"profile-notes" = made.notes;
         config._launch.profile_places = made.places;
     }
     const state = replacement._conditional_state;
@@ -1303,6 +1313,8 @@ pub fn followFile(original: *Config, draft: *Config, replacement: *const Config,
     if (follow_profiles) baselines.profiles = .{ .values = .of(original), .places = fresh, .state = state };
     if (follow_order) baselines.order = .{ .values = original.@"profile-order".list.items, .places = fresh, .state = state };
     if (follow_hidden) baselines.hidden = .{ .values = original.@"profile-hidden".list.items, .places = fresh, .state = state };
+    if (follow_favorites) baselines.favorites = .{ .values = original.@"profile-favorite".list.items, .places = fresh, .state = state };
+    if (follow_notes) baselines.notes = .{ .values = original.@"profile-notes".list.items, .places = fresh, .state = state };
 }
 
 /// Which of a config's profile keys follow the file (`followFile`).
@@ -1310,11 +1322,15 @@ const Follows = struct {
     profiles: bool,
     order: bool,
     hidden: bool,
+    favorites: bool,
+    notes: bool,
 
     /// Whether the lines read for `key` follow the file.
     fn of(self: Follows, key: []const u8) bool {
         if (std.mem.eql(u8, key, "profile-order")) return self.order;
         if (std.mem.eql(u8, key, "profile-hidden")) return self.hidden;
+        if (std.mem.eql(u8, key, "profile-favorite")) return self.favorites;
+        if (std.mem.eql(u8, key, "profile-notes")) return self.notes;
         return self.profiles;
     }
 };
@@ -1493,6 +1509,109 @@ fn setList(draft: *Config, list: *Config.RepeatableString, keys: []const []const
     var next: Config.RepeatableString = .{};
     for (keys) |key| try next.list.append(a, try a.dupeZ(u8, key));
     list.* = next;
+}
+
+/// The key a profile's favorite and preset notes are written under: a
+/// found profile's own key (`pwsh.exe`, `wsl:Ubuntu`), `user:<id>` for one
+/// of the person's. In `buf`.
+pub fn favoriteKey(buf: []u8, profile: *const Profile) []const u8 {
+    if (profile.detected) return profile.key;
+    return std.fmt.bufPrint(buf, "user:{s}", .{profile.id}) catch profile.key;
+}
+
+/// Whether a `profile-favorite` value names `key` as written: the key in
+/// the case the loader compares it (`windows_shell.storedProfileKeyEquals`),
+/// and a user profile's bare id too.
+fn favoriteValueNames(value: []const u8, key: []const u8) bool {
+    if (windows_shell.storedProfileKeyEquals(std.mem.trim(u8, value, " \t"), key)) return true;
+    if (std.ascii.startsWithIgnoreCase(key, "user:")) return std.ascii.eqlIgnoreCase(std.mem.trim(u8, value, " \t"), key["user:".len..]);
+    return false;
+}
+
+/// Whether `config`'s `profile-favorite` names the profile `key`
+/// (`favoriteKey`). A value that names several (`wsl`) is not seen here.
+pub fn isFavorite(config: *const Config, key: []const u8) bool {
+    for (config.@"profile-favorite".list.items) |value| if (favoriteValueNames(value, key)) return true;
+    return false;
+}
+
+/// The draft's `profile-favorite` with `key` in it (`on`) or out: the
+/// values that name it go, and `on` puts it last. Nothing changes when it
+/// is already so.
+pub fn setFavorite(draft: *Config, key: []const u8, on: bool) Allocator.Error!void {
+    if (isFavorite(draft, key) == on) return;
+    const a = arenaOf(draft);
+    var next: Config.RepeatableString = .{};
+    for (draft.@"profile-favorite".list.items) |value| {
+        if (!favoriteValueNames(value, key)) try next.list.append(a, value);
+    }
+    if (on) try next.list.append(a, try a.dupeZ(u8, key));
+    draft.@"profile-favorite" = next;
+}
+
+/// The notes `config`'s `profile-notes` keeps for the found profile `key`,
+/// as written (`profile_dialog.encodeNotes`): the last value for it.
+pub fn presetNotes(config: *const Config, key: []const u8) ?[]const u8 {
+    const values = config.@"profile-notes".list.items;
+    var index = values.len;
+    while (index > 0) {
+        index -= 1;
+        const value = values[index];
+        const sign = std.mem.indexOfScalar(u8, value, '=') orelse continue;
+        if (windows_shell.storedProfileKeyEquals(std.mem.trim(u8, value[0..sign], " \t"), key)) return value[sign + 1 ..];
+    }
+    return null;
+}
+
+/// The draft's notes for the found profile `key` are `encoded` (written by
+/// `profile_dialog.encodeNotes`), or none when it is empty: its values go,
+/// and a new one goes last.
+pub fn setPresetNotes(draft: *Config, key: []const u8, encoded: []const u8) Allocator.Error!void {
+    if (presetNotes(draft, key)) |now| if (std.mem.eql(u8, now, encoded)) return;
+    if (presetNotes(draft, key) == null and encoded.len == 0) return;
+    const a = arenaOf(draft);
+    var next: Config.RepeatableString = .{};
+    for (draft.@"profile-notes".list.items) |value| {
+        const sign = std.mem.indexOfScalar(u8, value, '=') orelse {
+            try next.list.append(a, value);
+            continue;
+        };
+        if (!windows_shell.storedProfileKeyEquals(std.mem.trim(u8, value[0..sign], " \t"), key)) try next.list.append(a, value);
+    }
+    if (encoded.len != 0) try next.list.append(a, try std.fmt.allocPrintSentinel(a, "{s}={s}", .{ key, encoded }, 0));
+    draft.@"profile-notes" = next;
+}
+
+/// What `setPresetNotes` would refuse to write: a line longer than the
+/// config reader takes.
+pub fn checkPresetNotes(key: []const u8, encoded: []const u8) ?[]const u8 {
+    if ("profile-notes = ".len + key.len + 1 + encoded.len > LineIterator.max_line_len) return "The notes are too long for one line of the config file.";
+    return null;
+}
+
+test "favorites and preset notes: set, read back, take out" {
+    var draft = try Config.default(testing.allocator);
+    defer draft.deinit();
+    try testing.expect(!isFavorite(&draft, "pwsh.exe"));
+    try setFavorite(&draft, "pwsh.exe", true);
+    try setFavorite(&draft, "user:dev", true);
+    try testing.expect(isFavorite(&draft, "PWSH.EXE"));
+    try testing.expect(isFavorite(&draft, "user:DEV"));
+    try setFavorite(&draft, "pwsh.exe", false);
+    try testing.expect(!isFavorite(&draft, "pwsh.exe"));
+    try testing.expectEqual(@as(usize, 1), draft.@"profile-favorite".list.items.len);
+    // A bare id names the user profile too.
+    try draft.@"profile-favorite".list.append(arenaOf(&draft), "ops");
+    try testing.expect(isFavorite(&draft, "user:ops"));
+
+    try testing.expect(presetNotes(&draft, "wsl:Ubuntu") == null);
+    try setPresetNotes(&draft, "wsl:Ubuntu", "a=b");
+    try setPresetNotes(&draft, "cmd.exe", "x");
+    try expectSameText("a=b", presetNotes(&draft, "WSL:ubuntu").?);
+    try setPresetNotes(&draft, "wsl:Ubuntu", "");
+    try testing.expect(presetNotes(&draft, "wsl:Ubuntu") == null);
+    try expectSameText("x", presetNotes(&draft, "cmd.exe").?);
+    try testing.expectEqual(@as(usize, 1), draft.@"profile-notes".list.items.len);
 }
 
 pub fn setCommand(draft: *Config, id: []const u8, text: []const u8) Allocator.Error!void {

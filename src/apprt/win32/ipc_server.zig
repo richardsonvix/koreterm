@@ -1159,6 +1159,15 @@ pub fn forwardsLauncherDirectory(config: *const configpkg.Config) bool {
     return directory == .inherit;
 }
 
+/// Whether this process started with nothing on its command line a running
+/// instance would apply (`normalizeForwardedStartupArg` keeps none of its
+/// arguments): a plain start, which only brings that instance forward.
+fn isPlainStartup(alloc: Allocator) !bool {
+    const arguments = try collectStartupForwardArguments(alloc, false);
+    defer win32_ipc.freeOwnedArguments(alloc, arguments);
+    return arguments == null;
+}
+
 fn collectStartupForwardArguments(alloc: Allocator, forward_cwd: bool) !?[]const [:0]const u8 {
     var iter = try cli_args.argsIterator(alloc);
     defer iter.deinit();
@@ -1899,6 +1908,25 @@ pub fn tryForwardStartupToExistingInstance(self: *App) !bool {
     // argv (`-ToastActivated -Embedding`), which would open a window there.
     if (self.toast_activated) {
         const launch_z = try coldToastForwardArgument(self.core_app.alloc, self.cold_toast_activation);
+        defer self.core_app.alloc.free(launch_z);
+        return try sendNewWindowIpcGranting(
+            self.core_app.alloc,
+            pipe_name,
+            self.is_elevated,
+            &.{launch_z},
+            win32_ipc.automation_response_timeout_ms,
+            allowSetForegroundWindow,
+        );
+    }
+
+    // A plain start (a shortcut, the Start menu, the exe itself: nothing on
+    // the command line the running instance would apply) opens no second
+    // window: the running instance brings its window forward, as a click on
+    // one of its toasts with no target does (`Notifications.click`, which
+    // opens a window only when it has none). `+new-window`, the jump list's
+    // tasks and a launch that names a profile or a directory still open one.
+    if (try isPlainStartup(self.core_app.alloc)) {
+        const launch_z = try coldToastForwardArgument(self.core_app.alloc, null);
         defer self.core_app.alloc.free(launch_z);
         return try sendNewWindowIpcGranting(
             self.core_app.alloc,

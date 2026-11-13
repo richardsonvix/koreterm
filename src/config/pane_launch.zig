@@ -716,8 +716,10 @@ fn commandLineSetsEnv(config: *const Config) bool {
 }
 
 /// Record where `arg` (`--<key>=<value>`) was read when it writes an id of a
-/// `profile-*` key, or a value of `default-profile`, `profile-order` or
-/// `profile-hidden` (recorded under the value itself). A line the parser
+/// `profile-*` key, or a value of `default-profile`, `profile-order`,
+/// `profile-hidden` or `profile-notes` (recorded under the value itself:
+/// Settings compares a file's own `profile-notes` lines,
+/// `settings_patch.changedUnder`). A line the parser
 /// will refuse writes nothing and is not recorded.
 fn recordProfilePlace(config: *Config, alloc: Allocator, arg: []const u8, iter: anytype) Allocator.Error!void {
     if (!std.mem.startsWith(u8, arg, "--profile-") and !std.mem.startsWith(u8, arg, "--default-profile=")) return;
@@ -733,7 +735,7 @@ fn recordProfilePlace(config: *Config, alloc: Allocator, arg: []const u8, iter: 
         // `profile-hidden` is recorded the same way: Settings compares a
         // file's own lines for them (`settings_patch.changedUnder`), clears
         // included. No reference is empty, so no lookup finds these.
-        inline for (.{ "profile-env", "profile-order", "profile-hidden" }) |cleared| {
+        inline for (.{ "profile-env", "profile-order", "profile-hidden", "profile-favorite", "profile-notes" }) |cleared| {
             if (std.mem.eql(u8, key, cleared)) try config._launch.profile_places.append(alloc, .{
                 .key = cleared,
                 .id = "",
@@ -742,7 +744,7 @@ fn recordProfilePlace(config: *Config, alloc: Allocator, arg: []const u8, iter: 
         }
         return;
     }
-    inline for (.{ "default-profile", "profile-order", "profile-hidden" }) |reference_key| {
+    inline for (.{ "default-profile", "profile-order", "profile-hidden", "profile-favorite", "profile-notes" }) |reference_key| {
         if (std.mem.eql(u8, key, reference_key)) {
             try config._launch.profile_places.append(alloc, .{
                 .key = reference_key,

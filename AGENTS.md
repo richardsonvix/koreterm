@@ -128,6 +128,9 @@ reading step under [Self-Correction Log](#self-correction-log).
   tracing, chrome rectangle math, and GDI paint primitives.
 - Windows packaging: `dist/windows/` + `scripts/package-windows.ps1`
 - libghostty-vt headers: `include/ghostty/`
+- Agent memory (the user's preferences and ongoing work, one fact a file,
+  indexed by `MEMORY.md`): `docs/agents/memory/`. Claude Code's own memory
+  folder for this project is a junction to it, so it is kept in the repo.
 
 This fork ships only the Win32 runtime (`src/apprt/win32*`): it removed the
 upstream `macos/` Xcode app and the `src/apprt/gtk` runtime, and they stay

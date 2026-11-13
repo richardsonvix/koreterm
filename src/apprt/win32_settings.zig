@@ -41,6 +41,7 @@ const terminals_import = @import("win32/terminals_import.zig");
 const terminals_dialog = @import("win32/terminals_import_dialog.zig");
 const profile_credentials = @import("win32/profile_credentials.zig");
 const rdp_dialog = @import("win32/rdp_connection_dialog.zig");
+const preset_dialog = @import("win32/preset_dialog.zig");
 const settings_backup = @import("win32/settings_backup.zig");
 const profile_dialog = @import("win32/profile_dialog.zig");
 const tab_appearance = @import("win32/tab_style.zig");
@@ -1037,7 +1038,7 @@ const StatusNote = enum {
             .saved_lists_unchecked => "Saved. A later config file or command-line option adds to the hidden profiles, and koreterm has not found every profile yet, so it could not check whether that hides more of them.",
             .disk_changed => "Nothing was saved: another program changed the config file while it was being saved. Save again. Your edits are kept.",
             .profile_changed => "Nothing was saved: another program changed a profile in the config file since Settings read it. Reload the configuration, then make the change again. Your edits are kept.",
-            .profile_lists_foreign => "Nothing was saved: another layer than the config file Settings saves to sets the profile order or the hidden profiles. Your edits are kept.",
+            .profile_lists_foreign => "Nothing was saved: another layer than the config file Settings saves to sets the profile order, the hidden profiles, the favorites or the preset notes. Your edits are kept.",
             .save_failed => "Save failed. Your edits are kept. Check that the config file can be written and is not open in another program, then try again.",
             .unsupported_encoding => "Nothing was saved: the config file is not readable as UTF-8 text (Windows PowerShell 5.1 writes UTF-16). Save it as UTF-8 in an editor, then save again. Your edits are kept.",
             .dangling_link => "Nothing was saved: the config file is a link to a file that does not exist. Fix or remove the link, then save again. Your edits are kept.",
@@ -8140,7 +8141,10 @@ pub const SettingsWindow = struct {
     pub const ProfileActions = struct { enter: ?[]const u8 = null, delete: ?[]const u8 = null };
 
     fn profileActions(self: *const SettingsWindow, row: settings_profiles.Row) ProfileActions {
-        if (self.profile_model.profileOf(row)) |profile| if (profile.read_only or profile.detected) return .{};
+        if (self.profile_model.profileOf(row)) |profile| {
+            if (profile.read_only or profile.found_hidden) return .{};
+            if (profile.detected) return .{ .enter = "Favorite and notes (Enter)" };
+        }
         return switch (row.kind) {
             .new_profile => .{ .enter = "New profile (Enter)" },
             .profile => .{
@@ -8187,7 +8191,8 @@ pub const SettingsWindow = struct {
         if (!self.profileEditDone()) return false;
         const row = self.selectedProfileRow() orelse return false;
         // One title row a profile: its window edits it. A profile koreterm
-        // finds is a preset: Enter starts a new profile based on it.
+        // finds is a preset: Enter opens its favorite and notes
+        // (`profileEditPreset`); the menu starts a profile based on it.
         if (!self.profile_fields_shown) {
             if (row.kind == .new_profile) {
                 self.profileEditWindow(null, null, null);
@@ -8195,7 +8200,7 @@ pub const SettingsWindow = struct {
             }
             if (self.profile_model.profileOf(row)) |profile| {
                 if (profile.detected and !profile.found_hidden) {
-                    self.profileEditWindow(null, row.profile, null);
+                    self.profileEditPreset(row.profile);
                     return true;
                 }
                 if (!profile.detected and !profile.read_only) {
@@ -8245,8 +8250,9 @@ pub const SettingsWindow = struct {
     /// The Remote Desktop connection window (`rdp_connection_dialog`) for
     /// the user profile `existing_id`, or for a new connection: what it
     /// returns goes into the draft (the command line with the connection's
-    /// own quality settings, and the name), and the login is kept apart from
-    /// the config (`profile_credentials`). Save writes the draft.
+    /// own quality settings, the name, and the notes as the profile's
+    /// `windows_shell.notes_env`), and the login is kept apart from the
+    /// config (`profile_credentials`). Save writes the draft.
     fn profileEditRdp(self: *SettingsWindow, existing_id: ?[]const u8) void {
         if (!self.draftTakesEdits()) return;
         if (!self.profileEditDone()) return;
@@ -8267,6 +8273,14 @@ pub const SettingsWindow = struct {
             conn.port = target.port;
             conn.options = target.rdp;
             conn.name = a.dupe(u8, draft.@"profile-name".get(given) orelse given) catch return self.profileChangeFailed();
+            if (draft.@"profile-env".get(given)) |env| {
+                var it = env.iterator();
+                while (it.next()) |kv| if (std.ascii.eqlIgnoreCase(kv.key_ptr.*, windows_shell.notes_env)) {
+                    conn.notes = profile_dialog.decodeNotes(a, kv.value_ptr.*) catch return self.profileChangeFailed();
+                    break;
+                };
+            }
+            conn.favorite = settings_profiles.isFavorite(draft, std.fmt.allocPrint(a, "user:{s}", .{given}) catch return self.profileChangeFailed());
             kept = profile_credentials.readEntry(alloc, given) catch null;
             if (kept) |entry| {
                 conn.user = entry.user;
@@ -8284,6 +8298,13 @@ pub const SettingsWindow = struct {
         terminals_import.writeRdpCommand(&writer, conn.server, conn.port, conn.options) catch
             return self.setProfileNote(.refused, "Error: that connection is too long for one line of the config file.", .{});
         const command = writer.buffered();
+        // The notes are checked before anything goes into the draft.
+        const notes: ?[]const u8 = if (conn.notes.len == 0) null else notes: {
+            const encoded = profile_dialog.encodeNotes(a, conn.notes) catch return self.profileChangeFailed();
+            if (settings_profiles.checkVariableValue(id orelse "profile", windows_shell.notes_env, encoded)) |message|
+                return self.setProfileNote(.refused, "Error: the notes: {s}", .{message});
+            break :notes encoded;
+        };
         const saved_id: []const u8 = if (id) |existing| saved: {
             if (settings_profiles.checkCommand(existing, command)) |message| return self.setProfileNote(.refused, "Error: {s}", .{message});
             settings_profiles.setCommand(draft, existing, command) catch return self.profileChangeFailed();
@@ -8297,6 +8318,17 @@ pub const SettingsWindow = struct {
                 return self.setProfileNote(.refused, "Error: the connection could not be added.", .{});
             break :added added;
         };
+        if (notes) |encoded| {
+            settings_profiles.setVariable(draft, saved_id, windows_shell.notes_env, encoded) catch return self.profileChangeFailed();
+        } else if (id != null) {
+            if (draft.@"profile-env".get(saved_id)) |env| {
+                var it = env.iterator();
+                const had = while (it.next()) |kv| {
+                    if (std.ascii.eqlIgnoreCase(kv.key_ptr.*, windows_shell.notes_env)) break true;
+                } else false;
+                if (had) settings_profiles.removeVariable(draft, saved_id, windows_shell.notes_env) catch return self.profileChangeFailed();
+            }
+        }
         // The login: a password typed in, or the kept one under a new user.
         const password: []const u8 = conn.password orelse if (kept) |entry| entry.password else "";
         if (conn.password != null or (kept == null and conn.user.len != 0) or (kept != null and !std.mem.eql(u8, kept.?.user, conn.user))) {
@@ -8304,7 +8336,9 @@ pub const SettingsWindow = struct {
                 self.setProfileNote(.refused, "Error: the login could not be kept.", .{});
         }
         if (conn.password) |typed| @memset(@constCast(typed), 0);
+        const favorite_refused = self.setProfileFavorite(draft, std.fmt.allocPrint(a, "user:{s}", .{saved_id}) catch return self.profileChangeFailed(), conn.favorite);
         self.profileDraftChanged(settings_profiles.identity(.profile, saved_id, null));
+        if (favorite_refused) |why| return self.setProfileNote(.refused, "The favorite was not changed. {s}", .{why});
         self.setProfileNote(.said, "Remote Desktop connection {s} changed in the draft. Save to keep it.", .{conn.name});
     }
 
@@ -8389,7 +8423,14 @@ pub const SettingsWindow = struct {
             if (profile.detected) {
                 fields.command = self.presetCommand(a, profile.key) orelse
                     return self.setProfileNote(.said, "koreterm has not said what {s} runs yet: try again in a moment.", .{profile.key});
+                // A copy of a preset takes its notes along.
+                if (self.pending) |*now| if (settings_profiles.presetNotes(now, profile.key)) |encoded| {
+                    fields.notes = profile_dialog.decodeNotes(a, encoded) catch return self.profileChangeFailed();
+                };
             } else fields.command = a.dupe(u8, profile.command) catch return self.profileChangeFailed();
+            if (existing_id) |id| if (self.pending) |*now| {
+                fields.favorite = settings_profiles.isFavorite(now, std.fmt.allocPrint(a, "user:{s}", .{id}) catch return self.profileChangeFailed());
+            };
             const label = profile.label orelse profile.id;
             fields.name = if (existing_id != null) a.dupe(u8, label) catch return self.profileChangeFailed() else std.fmt.allocPrint(a, "{s} (copy)", .{label}) catch return self.profileChangeFailed();
             fields.folder = a.dupe(u8, profile.folder orelse "") catch return self.profileChangeFailed();
@@ -8422,6 +8463,7 @@ pub const SettingsWindow = struct {
             .elevated = given.elevated,
             .variables = a.dupe(u8, given.variables) catch return self.profileChangeFailed(),
             .notes = a.dupe(u8, given.notes) catch return self.profileChangeFailed(),
+            .favorite = given.favorite,
         };
         var check: ProfileWindowCheck = .{ .id = existing_id orelse "profile" };
         const title = if (existing_id == null) std.unicode.utf8ToUtf16LeStringLiteral("New profile") else std.unicode.utf8ToUtf16LeStringLiteral("Edit profile");
@@ -8478,8 +8520,85 @@ pub const SettingsWindow = struct {
             } else false;
             if (!still) settings_profiles.removeVariable(draft, id, name) catch return self.profileChangeFailed();
         }
+        const favorite_refused = self.setProfileFavorite(draft, std.fmt.allocPrint(a, "user:{s}", .{id}) catch return self.profileChangeFailed(), fields.favorite);
         self.profileDraftChanged(settings_profiles.identity(.profile, id, null));
+        if (favorite_refused) |why| return self.setProfileNote(.refused, "The favorite was not changed. {s}", .{why});
         self.setProfileNote(.said, "Profile {s} changed in the draft. Save to keep it.", .{fields.name});
+    }
+
+    /// The draft's `profile-favorite` names `key` (`on`) or not. Null when
+    /// done (or nothing to do); otherwise why not, as the status line says
+    /// it: another layer sets the profile lists (`profileListsRefused`), or
+    /// no memory.
+    fn setProfileFavorite(self: *SettingsWindow, draft: *Config, key: []const u8, on: bool) ?[]const u8 {
+        if (settings_profiles.isFavorite(draft, key) == on) return null;
+        self.recheckUnreadLists();
+        if (self.profileListsRefused()) |why| return why.text();
+        settings_profiles.setFavorite(draft, key, on) catch return "There was not enough memory.";
+        return null;
+    }
+
+    /// Enter on a profile koreterm finds (a preset): its window
+    /// (`preset_dialog`) for what is the person's own, its favorite
+    /// (`profile-favorite`) and its notes (`profile-notes`). Settings does
+    /// not change what it runs. Save writes the draft.
+    fn profileEditPreset(self: *SettingsWindow, index: u32) void {
+        if (!self.draftTakesEdits()) return;
+        if (!self.profileEditDone()) return;
+        // Both are lists written whole, as the order and the hidden ones.
+        self.recheckUnreadLists();
+        if (self.profileListsRefused()) |why| return self.setProfileNote(.refused, "{s}", .{why.text()});
+        if (index >= self.profile_model.profiles.len) return;
+        var arena: std.heap.ArenaAllocator = .init(self.handle.alloc);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const before = if (self.pending) |*config| config else return;
+        // Copies: the dialog's loop may rebuild the page's model.
+        const profile = &self.profile_model.profiles[index];
+        const key = a.dupe(u8, profile.key) catch return self.profileChangeFailed();
+        var preset: preset_dialog.Preset = .{
+            .label = a.dupe(u8, profile.label orelse profile.key) catch return self.profileChangeFailed(),
+            .favorite = settings_profiles.isFavorite(before, key),
+        };
+        if (settings_profiles.presetNotes(before, key)) |encoded| {
+            preset.notes = profile_dialog.decodeNotes(a, encoded) catch return self.profileChangeFailed();
+        }
+        const accepted = preset_dialog.edit(a, self.hwnd, &preset) catch return self.profileChangeFailed();
+        if (!accepted) return;
+        // The dialog's loop may have let an external reload replace the draft.
+        if (!self.draftTakesEdits()) return;
+        const draft = if (self.pending) |*config| config else return;
+        const encoded = profile_dialog.encodeNotes(a, preset.notes) catch return self.profileChangeFailed();
+        if (settings_profiles.checkPresetNotes(key, encoded)) |message| return self.setProfileNote(.refused, "Error: {s}", .{message});
+        settings_profiles.setFavorite(draft, key, preset.favorite) catch return self.profileChangeFailed();
+        settings_profiles.setPresetNotes(draft, key, encoded) catch return self.profileChangeFailed();
+        self.profileDraftChanged(settings_profiles.identity(.profile, key, null));
+        self.setProfileNote(.said, "{s} changed in the draft. Save to keep it.", .{preset.label});
+    }
+
+    /// The list menu's Favorite: the selected profile in or out of the
+    /// new-tab menu (`profile-favorite`).
+    fn profileToggleFavorite(self: *SettingsWindow) void {
+        if (!self.draftTakesEdits()) return;
+        if (!self.profileEditDone()) return;
+        const row = self.selectedProfileRow() orelse return;
+        const profile = self.profile_model.profileOf(row) orelse return;
+        if (profile.read_only or profile.found_hidden) return;
+        var arena: std.heap.ArenaAllocator = .init(self.handle.alloc);
+        defer arena.deinit();
+        const a = arena.allocator();
+        // Copies: the draft change rebuilds the page's model.
+        var key_buf: [profile_map.max_id_len + 8]u8 = undefined;
+        const key = a.dupe(u8, settings_profiles.favoriteKey(&key_buf, profile)) catch return self.profileChangeFailed();
+        const label = a.dupe(u8, profile.label orelse profile.id) catch return self.profileChangeFailed();
+        const draft = if (self.pending) |*config| config else return;
+        const on = !settings_profiles.isFavorite(draft, key);
+        if (self.setProfileFavorite(draft, key, on)) |why| return self.setProfileNote(.refused, "{s}", .{why});
+        self.profileDraftChanged(row.identity);
+        if (on)
+            self.setProfileNote(.said, "{s} is a favorite: the new-tab menu lists it. Save to keep it.", .{label})
+        else
+            self.setProfileNote(.said, "{s} is no longer a favorite. Save to keep it.", .{label});
     }
 
     /// The list menu's Delete profile: a user profile is removed (after a
@@ -9551,6 +9670,12 @@ pub const SettingsWindow = struct {
         };
         _ = sys.AppendMenuW(menu, MF_STRING | @as(UINT, if (self.profile_sorted) MF_CHECKED else 0), profile_menu_sort, std.unicode.utf8ToUtf16LeStringLiteral("&Sort A to Z"));
         _ = sys.AppendMenuW(menu, MF_STRING | @as(UINT, if (self.profile_mine_only) MF_CHECKED else 0), profile_menu_mine, std.unicode.utf8ToUtf16LeStringLiteral("Only &my profiles"));
+        if (self.profile_model.profileOf(row)) |profile| if (row.kind != .new_profile and !profile.read_only and !profile.found_hidden) {
+            var key_buf: [profile_map.max_id_len + 8]u8 = undefined;
+            const favorite = if (self.pending) |*draft| settings_profiles.isFavorite(draft, settings_profiles.favoriteKey(&key_buf, profile)) else false;
+            const takes: UINT = if (self.draftTakesEdits()) 0 else MF_GRAYED;
+            _ = sys.AppendMenuW(menu, MF_STRING | takes | @as(UINT, if (favorite) MF_CHECKED else 0), profile_menu_favorite, std.unicode.utf8ToUtf16LeStringLiteral("★ &Favorite (new-tab menu)"));
+        };
         if (row.kind != .new_profile) _ = sys.AppendMenuW(menu, MF_STRING, profile_menu_new, std.unicode.utf8ToUtf16LeStringLiteral("&New profile\tInsert"));
         if (self.profile_model.profileOf(row)) |profile| if (!profile.found_hidden) {
             const takes: UINT = if (self.draftTakesEdits()) 0 else MF_GRAYED;
@@ -9577,6 +9702,7 @@ pub const SettingsWindow = struct {
             profile_menu_new => self.profileNew(),
             profile_menu_sort => self.profileToggleSort(),
             profile_menu_mine => self.profileToggleDetected(),
+            profile_menu_favorite => self.profileToggleFavorite(),
             profile_menu_up => self.profileMove(-1),
             profile_menu_down => self.profileMove(1),
             profile_menu_hide => self.profileToggleHidden(),
@@ -22396,6 +22522,7 @@ const profile_menu_based: usize = 13;
 const profile_menu_delete: usize = 14;
 const profile_menu_sort: usize = 15;
 const profile_menu_mine: usize = 16;
+const profile_menu_favorite: usize = 17;
 /// What the Profiles list's UIA help text says: the keys it takes.
 const profile_list_help = "Up and Down move through the profiles, in the picker's order, and your profiles' fields: command line, name, starting folder and variables. " ++
     "Enter edits the selected field, Delete removes it (a profile asks twice), Insert or Ctrl+N adds a profile, Ctrl+I imports profiles from a Terminals export, Alt+Up and Alt+Down move a profile, Ctrl+H hides it or shows it, and Shift+F10 offers these. " ++

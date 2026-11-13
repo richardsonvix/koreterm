@@ -1889,6 +1889,25 @@ class: ?[:0]const u8 = null,
 /// are.
 @"profile-hidden": RepeatableString = .{},
 
+/// A favorite profile: the new-tab menu (the arrow beside +) lists only
+/// favorites, in the picker's order; repeat it for each one. A value names
+/// profiles as `profile-hidden` does (`pwsh.exe`, `wsl:Ubuntu`, `user:dev`).
+/// With none, the menu lists every profile, as before. The command palette,
+/// the quick slots and their shortcuts are not changed by it. Settings sets
+/// it from the star in a profile's window. `profile-favorite =` clears it.
+@"profile-favorite": RepeatableString = .{},
+
+/// Notes about a profile koreterm finds (PowerShell, Command Prompt, WSL, an
+/// SSH host): `profile-notes = <key>=<notes>`, the key as `profile-hidden`
+/// writes it (`pwsh.exe`, `wsl:Ubuntu`, `ssh:prod`), then the notes on one
+/// line, a line break written `\n`, a backslash `\\` and a quote `\"`.
+/// Repeat it for each profile; the last one for a key wins. They are for
+/// the person only: nothing runs or reads them but Settings, which edits
+/// them on the Profiles page. A profile of your own keeps its notes among
+/// its variables instead (`KORETERM_NOTES` in `profile-env`).
+/// `profile-notes =` clears them.
+@"profile-notes": RepeatableString = .{},
+
 /// Key bindings. The format is `trigger=action`. Duplicate triggers will
 /// overwrite previously set values. The list of actions is available in
 /// the documentation or using the `koreterm +list-actions` command.

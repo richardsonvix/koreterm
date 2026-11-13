@@ -215,6 +215,8 @@ extern "user32" fn SetPropW(hwnd: HWND, name: LPCWSTR, data: ?*anyopaque) callco
 extern "user32" fn GetPropW(hwnd: HWND, name: LPCWSTR) callconv(.winapi) ?*anyopaque;
 extern "user32" fn RemovePropW(hwnd: HWND, name: LPCWSTR) callconv(.winapi) ?*anyopaque;
 extern "user32" fn GetWindowLongPtrW(hwnd: HWND, index: i32) callconv(.winapi) isize;
+extern "user32" fn SetParent(child: HWND, parent: HWND) callconv(.winapi) ?HWND;
+extern "user32" fn EnableWindow(hwnd: HWND, enable: BOOL) callconv(.winapi) BOOL;
 extern "user32" fn SetWindowLongPtrW(hwnd: HWND, index: i32, value: isize) callconv(.winapi) isize;
 
 extern "ole32" fn CLSIDFromProgID(progid: [*:0]const u16, clsid: *GUID) callconv(.winapi) HRESULT;
@@ -318,6 +320,16 @@ fn getDispatch(disp: *IDispatch, name: [*:0]const u16) ?*IDispatch {
         return null;
     }
     return v.data.pdispVal; // the reference is the caller's now
+}
+
+/// Call the method `name` with the 32-bit integer arguments `args`, in the
+/// order the method declares them (`DISPPARAMS` takes them last first).
+fn callI4s(disp: *IDispatch, name: [*:0]const u16, comptime n: usize, args: [n]i32) bool {
+    const id = dispid(disp, name) orelse return false;
+    var values: [n]VARIANT = undefined;
+    for (args, 0..) |arg, i| values[n - 1 - i] = .{ .vt = VT_I4, .data = .{ .lVal = arg } };
+    var params: DISPPARAMS = .{ .rgvarg = &values, .cArgs = n };
+    return succeeded(disp.vtbl.Invoke(disp, id, &IID_NULL, LOCALE_USER_DEFAULT, DISPATCH_METHOD, &params, null, null, null));
 }
 
 fn call(disp: *IDispatch, name: [*:0]const u16) bool {
@@ -426,6 +438,16 @@ pub const Options = struct {
     /// Connect to a server whose identity cannot be checked without asking
     /// (`rdp-trust-certificates`).
     trust_certificates: bool = false,
+    /// The remote computer's sound plays here. Off in a group's grid
+    /// (`rdp_group.zig`), where it is only watched.
+    audio: bool = true,
+
+    /// Whether `other` needs the session to connect again to take effect:
+    /// what the control reads only when it connects.
+    pub fn needsReconnect(self: Options, other: Options) bool {
+        return self.colors != other.colors or self.compression != other.compression or
+            self.experience != other.experience or self.audio != other.audio;
+    }
 };
 
 /// Reconnects a dropped session gets before the tab says it ended. Each one
@@ -458,6 +480,8 @@ pub const Pane = struct {
     profile_id: ?[]u8 = null,
     /// The server, without its port: PowerShell remoting's computer name.
     server: []u8 = &.{},
+    /// The port it connects to, for the tab's hint.
+    port: u16 = 3389,
     /// Where a line typed into the Run box is (`typeRunLine`): 0 none,
     /// 1 the Run box asked for, 2 the line pasted.
     send_step: u8 = 0,
@@ -475,14 +499,33 @@ pub const Pane = struct {
     idle_polls: u32 = 0,
     /// Reconnects tried since the session was last connected.
     reconnects: u32 = 0,
-    /// The remote desktop's resolution, fixed when it connects.
+    /// The remote desktop's resolution: the pane's when it connects, and
+    /// again after the pane settles at another size (`resizeTick`).
     desk_w: i32,
     desk_h: i32,
+    /// The pane's last size (`resize`), which the session is asked to take.
+    pane_w: i32 = 0,
+    pane_h: i32 = 0,
+    /// Where the pane's area starts in its parent: 0, 0 in a tab, a cell's
+    /// corner in a group's grid (`placeIn`).
+    origin_x: i32 = 0,
+    origin_y: i32 = 0,
+    /// The remote desktop's size as a percentage of the pane's: below 100
+    /// the server draws fewer pixels and the control scales them up
+    /// (`SmartSizing`). A group lowers it under load (`rdp_group.zig`).
+    desk_scale_pct: u8 = 100,
+    /// The session is being connected again to take new options
+    /// (`applyOptions`): the poll connects it, not ends it.
+    options_reconnect: bool = false,
 
     const prop_name = L("koreterm.rdp_pane");
     const poll_timer: usize = 0x5244; // "RD"
     const start_timer: usize = 0x5253; // "RS"
     const send_timer: usize = 0x5258; // "RX"
+    const resize_timer: usize = 0x525A; // "RZ"
+    /// How long the pane keeps one size before the session is asked to
+    /// take it: a drag between monitors or a live resize sends many.
+    const resize_settle_ms: u32 = 400;
     /// The Run box's time to open before the paste, and the paste's to land
     /// (the clipboard reaches the server through its own channel).
     const run_box_wait_ms: u32 = 900;
@@ -561,6 +604,7 @@ pub const Pane = struct {
         };
         self.profile_id = if (login.profile_id) |id| alloc.dupe(u8, id) catch null else null;
         self.server = alloc.dupe(u8, target.server) catch &.{};
+        self.port = target.port;
         self.user = alloc.dupe(u8, login.user) catch &.{};
         self.password = if (login.password) |text| alloc.dupe(u8, text) catch null else null;
 
@@ -598,6 +642,7 @@ pub const Pane = struct {
             _ = putI4(adv, L("MinutesToIdleTimeout"), 0);
         }
 
+        self.writeQuality();
         _ = SetPropW(window, prop_name, self);
         // Connect once the tab is made: the credential prompt is modal.
         _ = SetTimer(window, start_timer, 50, &startTick);
@@ -659,10 +704,142 @@ pub const Pane = struct {
         };
     }
 
-    /// The pane's new size.
+    /// The pane's new size. The control fits it at once, keeping the
+    /// remote desktop's proportions; once the size settles the session is
+    /// asked to take it (`resizeTick`), so a pane whose proportions changed
+    /// (a move to a monitor of another DPI, a resized window) is covered
+    /// again instead of showing bands of the terminal behind it.
     pub fn resize(self: *Pane, width: i32, height: i32) void {
-        const rect = fitRect(self.options.scaling, width, height, self.desk_w, self.desk_h);
-        _ = MoveWindow(self.hwnd, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, 1);
+        self.placeIn(self.origin_x, self.origin_y, width, height);
+    }
+
+    /// The pane's area is `width` x `height` at `x`, `y` in its parent (a
+    /// cell of a group's grid). As `resize`, the session follows once the
+    /// size settles.
+    pub fn placeIn(self: *Pane, x: i32, y: i32, width: i32, height: i32) void {
+        self.origin_x = x;
+        self.origin_y = y;
+        self.pane_w = width;
+        self.pane_h = height;
+        self.place();
+        const wanted = self.wantedDesktop();
+        if (wanted[0] != self.desk_w or wanted[1] != self.desk_h)
+            _ = SetTimer(self.hwnd, resize_timer, resize_settle_ms, &resizeTick);
+    }
+
+    /// The remote desktop's size as a percentage of the pane's
+    /// (`desk_scale_pct`); the session follows once the size settles.
+    pub fn setDesktopScale(self: *Pane, pct: u8) void {
+        const clamped = std.math.clamp(pct, 25, 100);
+        if (clamped == self.desk_scale_pct) return;
+        self.desk_scale_pct = clamped;
+        _ = SetTimer(self.hwnd, resize_timer, resize_settle_ms, &resizeTick);
+    }
+
+    /// The desktop size the session is asked for: the pane's, scaled.
+    fn wantedDesktop(self: *const Pane) [2]i32 {
+        const pct: i32 = self.desk_scale_pct;
+        const w = @divTrunc(self.pane_w * pct, 100);
+        const h = @divTrunc(self.pane_h * pct, 100);
+        return .{ std.math.clamp(w, 200, 8192), std.math.clamp(h, 200, 8192) };
+    }
+
+    fn place(self: *Pane) void {
+        const rect = fitRect(self.options.scaling, self.pane_w, self.pane_h, self.desk_w, self.desk_h);
+        _ = MoveWindow(self.hwnd, self.origin_x + rect.left, self.origin_y + rect.top, rect.right - rect.left, rect.bottom - rect.top, 1);
+    }
+
+    fn resizeTick(hwnd: ?HWND, _: UINT, _: usize, _: u32) callconv(.winapi) void {
+        const window = hwnd orelse return;
+        _ = KillTimer(window, resize_timer);
+        const raw = GetPropW(window, prop_name) orelse return;
+        const self: *Pane = @ptrCast(@alignCast(raw));
+        self.fitSession();
+    }
+
+    /// Ask a connected session to make its desktop the size the pane wants
+    /// (`wantedDesktop`, through
+    /// `IMsRdpClient9::UpdateSessionDisplaySettings`, at 100% scale), and
+    /// fit the control to it. A server or client without that (before
+    /// Windows 8.1 / Server 2012 R2) keeps the old size, fitted as before.
+    /// Not connected yet: the next connect takes it.
+    fn fitSession(self: *Pane) void {
+        const wanted = self.wantedDesktop();
+        const w = wanted[0];
+        const h = wanted[1];
+        if (w == self.desk_w and h == self.desk_h) return;
+        if (!self.isConnected()) {
+            if (self.started and !self.options_reconnect) return;
+            // Before the connect: it starts at this size.
+            self.desk_w = w;
+            self.desk_h = h;
+            _ = putI4(self.control, L("DesktopWidth"), w);
+            _ = putI4(self.control, L("DesktopHeight"), h);
+            return self.place();
+        }
+        // Width, height, physical width and height (mm, 0: unknown),
+        // orientation, desktop scale (%), device scale (%).
+        if (!callI4s(self.control, L("UpdateSessionDisplaySettings"), 7, .{ w, h, 0, 0, 0, 100, 100 })) {
+            log.info("rdp pane: the session keeps its size (no UpdateSessionDisplaySettings)", .{});
+            return;
+        }
+        self.desk_w = w;
+        self.desk_h = h;
+        self.place();
+    }
+
+    /// Move the control under `parent` (a group's grid, or a tab's pane),
+    /// telling `events` from now on. The session goes on as it was.
+    pub fn reparent(self: *Pane, parent: HWND, events: Events) void {
+        // The parent's own painting must not cover the control.
+        const WS_CLIPCHILDREN: isize = 0x02000000;
+        _ = SetWindowLongPtrW(parent, GWL_STYLE, GetWindowLongPtrW(parent, GWL_STYLE) | WS_CLIPCHILDREN);
+        _ = SetParent(self.hwnd, parent);
+        self.events = events;
+        self.origin_x = 0;
+        self.origin_y = 0;
+    }
+
+    /// Whether the mouse and keyboard reach the session. Off, it is only
+    /// watched (a group's grid); the control still draws.
+    pub fn setInteractive(self: *Pane, on: bool) void {
+        _ = EnableWindow(self.hwnd, @intFromBool(on));
+    }
+
+    /// Take `options`. What the control reads only when it connects
+    /// (`Options.needsReconnect`) makes a connected session connect again,
+    /// once, from the poll: one more sign-in with the kept login.
+    pub fn applyOptions(self: *Pane, options: Options) void {
+        const reconnect = self.options.needsReconnect(options);
+        self.options = options;
+        self.place();
+        if (!reconnect) return;
+        if (!self.started or !self.isConnected()) {
+            // Not connected yet, or dropped: the next connect takes them.
+            self.writeQuality();
+            return;
+        }
+        self.options_reconnect = true;
+        _ = call(self.control, L("Disconnect"));
+    }
+
+    /// The options the control reads when it connects.
+    fn writeQuality(self: *Pane) void {
+        _ = putI4(self.control, L("ColorDepth"), self.options.colors);
+        if (getDispatch(self.control, L("AdvancedSettings9")) orelse getDispatch(self.control, L("AdvancedSettings2"))) |adv| {
+            defer _ = adv.vtbl.Release(adv);
+            _ = putI4(adv, L("Compress"), @intFromBool(self.options.compression));
+            _ = putI4(adv, L("PerformanceFlags"), performanceFlags(self.options.experience));
+            // A bitmap cache on disk: what a watched desktop draws again
+            // (the same windows) is not sent again. (The property's name
+            // is misspelled in the control.)
+            _ = putI4(adv, L("BitmapPeristence"), 1);
+        }
+        // 0: play the remote sound here; 2: play it nowhere.
+        if (getDispatch(self.control, L("SecuredSettings2"))) |secured| {
+            defer _ = secured.vtbl.Release(secured);
+            _ = putI4(secured, L("AudioRedirectionMode"), if (self.options.audio) 0 else 2);
+        }
     }
 
     pub fn focus(self: *Pane) void {
@@ -755,6 +932,7 @@ pub const Pane = struct {
         _ = KillTimer(self.hwnd, poll_timer);
         _ = KillTimer(self.hwnd, start_timer);
         _ = KillTimer(self.hwnd, send_timer);
+        _ = KillTimer(self.hwnd, resize_timer);
         _ = RemovePropW(self.hwnd, prop_name);
         if (connectedState(self.control) != 0) _ = call(self.control, L("Disconnect"));
         _ = self.control.vtbl.Release(self.control);
@@ -795,8 +973,26 @@ pub const Pane = struct {
                 if (!self.told_connected) {
                     self.told_connected = true;
                     self.events.connected(self.events.ctx);
+                    // A size the pane took while it connected.
+                    if (self.pane_w != 0) self.fitSession();
                 }
             }
+            return;
+        }
+        // Disconnected to take new options (`applyOptions`): connect again
+        // with them, at the size the pane wants now.
+        if (self.options_reconnect) {
+            self.options_reconnect = false;
+            self.idle_polls = 0;
+            self.writeQuality();
+            const wanted = self.wantedDesktop();
+            self.desk_w = wanted[0];
+            self.desk_h = wanted[1];
+            _ = putI4(self.control, L("DesktopWidth"), wanted[0]);
+            _ = putI4(self.control, L("DesktopHeight"), wanted[1]);
+            self.place();
+            log.info("rdp pane: connecting again with new options", .{});
+            self.connect();
             return;
         }
         // Not connected. A bad server name fails before Connect returns, so
