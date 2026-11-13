@@ -1,3 +1,16 @@
+koreterm 1.3.142
+
+- Settings > Profiles: "Sort A to Z" lists the profiles alphabetically;
+  "Picker order" shows them again in the order of the profile menu (the
+  arrow beside the tabs), the order Move up and Move down change.
+- Settings > Profiles: "Hide built-in profiles" lists only the profiles you
+  made; the ones koreterm finds (PowerShell, Command Prompt, WSL, SSH hosts)
+  come back with "Show built-in profiles". Their rows now have a tinted
+  background, so your own stand apart.
+- Each profile has Notes: free text, any number of lines, in the profile
+  window (Settings > Profiles > Edit). They are saved with the profile and
+  never passed to the shell.
+
 koreterm 1.3.141
 
 - noctty is now koreterm, with a new icon: a core linked to its connections.

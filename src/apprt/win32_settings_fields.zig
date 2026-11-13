@@ -123,6 +123,9 @@ pub const NativeNames = struct {
 pub const DisplayRow = struct {
     kind: enum { action, text },
     section: Section,
+    /// Shown on the Profiles page instead, which has no `Section` here
+    /// (its rows are a list, not form fields); `section` is its neighbour.
+    profiles_page: bool = false,
     native: NativeNames,
     help: []const u8 = "",
     /// More words Settings search finds the row by, besides its names.
@@ -130,6 +133,12 @@ pub const DisplayRow = struct {
 };
 pub const display_rows = [_]DisplayRow{
     .{ .kind = .action, .section = .keybindings, .native = .{ .binding = "btn_keybindings_editor", .id = 302, .order = 0, .form_label = "Keybind configuration", .caption = "Open config for keybinds", .accessible_name = "Keybind configuration" }, .keywords = "keybind keybinding key binding shortcut hotkey keyboard" },
+    // Toggles the Profiles list between the picker's order and A to Z; its
+    // caption says what a click shows (`syncProfileSortButton`).
+    .{ .kind = .action, .section = .shell, .profiles_page = true, .native = .{ .binding = "btn_profile_sort", .id = 501, .order = 0, .form_label = "List order", .caption = "Sort A to Z", .accessible_name = "List order" }, .help = "Lists the profiles A to Z, or in the picker's order again. Moving a profile works in the picker's order.", .keywords = "sort alphabetical order a to z profiles list" },
+    // Shows or hides the profiles koreterm finds (PowerShell, WSL, ...) in
+    // the Profiles list (`syncProfileDetectedButton`).
+    .{ .kind = .action, .section = .shell, .profiles_page = true, .native = .{ .binding = "btn_profile_detected", .id = 502, .order = 1, .form_label = "Built-in profiles", .caption = "Hide built-in profiles", .accessible_name = "Built-in profiles" }, .help = "Lists only the profiles you made, or the ones koreterm finds (PowerShell, Command Prompt, WSL, SSH hosts) too. Moving a profile works with them all listed.", .keywords = "built-in detected found powershell wsl filter mine user profiles" },
     .{ .kind = .action, .section = .advanced, .native = .{ .binding = "btn_open_editor", .id = 101, .order = 0, .form_label = "Full config editor", .caption = "Open in default editor", .accessible_name = "Full config editor" }, .keywords = "config configuration file text editor edit raw" },
 };
 /// A composite Config key can expose multiple typed scalar controls without

@@ -184,6 +184,10 @@ pub const elevated_env = "KORETERM_ELEVATED";
 /// such as an emoji, or `none`): `src/apprt/win32/tab_style.zig`.
 pub const tab_color_env = "KORETERM_TAB_COLOR";
 pub const tab_icon_env = "KORETERM_TAB_ICON";
+/// The profile's notes, for the person only: one line, its line breaks
+/// written `\n` (`profile_dialog.encodeNotes`). Never put in a terminal's
+/// environment (`layerEnv`).
+pub const notes_env = "KORETERM_NOTES";
 
 /// The value of the variable `name` (any case) among `env`, if set.
 pub fn reservedEnv(env: []const EnvEntry, name: []const u8) ?[]const u8 {
@@ -253,6 +257,8 @@ pub const UserLaunch = struct {
 /// does. `alloc` is the arena `env` lives in.
 pub fn layerEnv(alloc: Allocator, env: anytype, entries: []const EnvEntry) Allocator.Error!void {
     for (entries) |entry| {
+        // Notes are the person's, not the shell's.
+        if (std.ascii.eqlIgnoreCase(entry.key, notes_env)) continue;
         var index: usize = 0;
         while (index < env.map.count()) {
             if (std.ascii.eqlIgnoreCase(env.map.keys()[index], entry.key)) {

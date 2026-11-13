@@ -490,6 +490,36 @@ pub const Model = struct {
         return .{ .at = index + 1, .of = self.profiles.len };
     }
 
+    /// `shown` (ids into `rows`, in model order) listed A to Z by each
+    /// profile's label (its id without one), without case: "New profile"
+    /// first, the hidden profiles after the shown ones as the picker lists
+    /// them, and each profile's field rows kept under it in their order. Only
+    /// the order the page lists the rows in: `profiles`, and the order a
+    /// move or a save works in, stay the picker's.
+    pub fn sortShown(self: *const Model, shown: []u16) void {
+        const Context = struct {
+            model: *const Model,
+
+            fn lessThan(ctx: @This(), a: u16, b: u16) bool {
+                const ra = ctx.model.rows[a];
+                const rb = ctx.model.rows[b];
+                if (ra.kind == .new_profile or rb.kind == .new_profile) return ra.kind == .new_profile and rb.kind != .new_profile;
+                if (ra.profile == rb.profile) return false;
+                const pa = &ctx.model.profiles[ra.profile];
+                const pb = &ctx.model.profiles[rb.profile];
+                if (pa.hidden != pb.hidden) return pb.hidden;
+                return switch (std.ascii.orderIgnoreCase(pa.label orelse pa.id, pb.label orelse pb.id)) {
+                    .lt => true,
+                    .gt => false,
+                    // The same name: the picker's order.
+                    .eq => ra.profile < rb.profile,
+                };
+            }
+        };
+        // Stable: a profile's rows keep their order under it.
+        std.sort.block(u16, shown, Context{ .model = self }, Context.lessThan);
+    }
+
     /// The profile whose key is `key` (without case, but an `ssh:` alias
     /// exactly, as OpenSSH takes it), if the page has it.
     pub fn profileByKey(self: *const Model, key: []const u8) ?u32 {
@@ -1912,6 +1942,54 @@ test "settings profiles: with the app's list, every profile in the picker's orde
     // Without the whole list, nothing moves or hides.
     try model.buildListed(alloc, &draft, &draft, &listed, false);
     try testing.expect(model.moveTarget(1, -1) == null);
+}
+
+test "settings profiles: A to Z lists the rows by label, New profile first, the hidden ones last, fields under their profile" {
+    const alloc = testing.allocator;
+    var draft = try testConfig(alloc, "profile-command = py: python.exe\nprofile-command = node: node.exe\nprofile-name = node: alpha\n", &.{});
+    defer draft.deinit();
+    const listed = [_]Listed{
+        .{ .key = "pwsh.exe", .label = "PowerShell" },
+        .{ .key = "user:py", .label = "py" },
+        .{ .key = "ssh:prod", .label = "prod" },
+        .{ .key = "cmd.exe", .label = "Command Prompt", .hidden = true },
+        .{ .key = "wsl:Arch", .label = "Arch", .hidden = true },
+    };
+    var model: Model = .{};
+    defer model.deinit();
+    try model.buildListed(alloc, &draft, &draft, &listed, true);
+    const shown = try alloc.alloc(u16, model.rows.len);
+    defer alloc.free(shown);
+    for (shown, 0..) |*id, index| id.* = @intCast(index);
+    model.sortShown(shown);
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    for (shown) |id| {
+        const row = model.rows[id];
+        try out.writer.print("{t} {s}\n", .{ row.kind, model.title(row) });
+    }
+    try expectSameText(
+        \\new_profile New profile
+        \\profile alpha
+        \\command Command line
+        \\name Name
+        \\folder Starting folder
+        \\add_variable Add variable
+        \\profile PowerShell
+        \\profile prod
+        \\profile py
+        \\command Command line
+        \\name Name
+        \\folder Starting folder
+        \\add_variable Add variable
+        \\profile Arch
+        \\profile Command Prompt
+        \\
+    , out.written());
+    // The page's own order, which a move works in, is the picker's still.
+    const keys = try testKeysText(alloc, &model);
+    defer alloc.free(keys);
+    try expectSameText("pwsh.exe\nuser:py\nuser:node\nssh:prod\ncmd.exe (hidden)\nwsl:Arch (hidden)\n", keys);
 }
 
 test "settings profiles: a move or a hide gives the draft both lists whole, and the page follows them" {

@@ -235,6 +235,7 @@ const VK_SHIFT: i32 = 0x10;
 const WM_CONTEXTMENU: UINT = 0x007B;
 const MF_STRING: UINT = 0x0000;
 const MF_GRAYED: UINT = 0x0001;
+const MF_CHECKED: UINT = 0x0008;
 const TPM_RIGHTBUTTON: UINT = 0x0002;
 const TPM_RETURNCMD: UINT = 0x0100;
 const WM_MENUCHAR: UINT = 0x0120;
@@ -316,6 +317,11 @@ const BTN_SECTION_REFERENCE: usize = 208;
 const BTN_SECTION_PROFILES: usize = 209;
 const BTN_SAVE: usize = 301;
 const BTN_KEYBINDINGS_EDITOR: usize = displayFieldId("btn_keybindings_editor");
+/// The Profiles page's List order button: A to Z, or the picker's order.
+const BTN_PROFILE_SORT: usize = displayFieldId("btn_profile_sort");
+/// The Profiles page's Built-in profiles button: list them, or only the
+/// user's own.
+const BTN_PROFILE_DETECTED: usize = displayFieldId("btn_profile_detected");
 const BTN_CONFLICT_KEEP: usize = 303;
 const BTN_CONFLICT_USE_DISK: usize = 304;
 const BTN_CLOSE_SAVE: usize = 305;
@@ -1424,7 +1430,7 @@ fn displayRowSpec(row: field_model.DisplayRow) FormControl {
         .name = row.native.accessible_name,
         .binding = row.native.binding,
         .id = row.native.id,
-        .section = nativeSection(row.section),
+        .section = if (row.profiles_page) .profiles else nativeSection(row.section),
         .order = row.native.order,
         .label = row.native.form_label,
         .caption = row.native.caption,
@@ -2521,6 +2527,14 @@ pub const SettingsWindow = struct {
     /// after the draft changes, and the list that shows them.
     profile_model: settings_profiles.Model = .{},
     profile_stale: bool = true,
+    /// The Profiles list shows its profiles A to Z (`Model.sortShown`)
+    /// instead of in the picker's order; only how the page lists them, so
+    /// nothing moves while it is on (`profileMove`).
+    profile_sorted: bool = false,
+    /// The Profiles list leaves out the profiles koreterm finds
+    /// (`Profile.detected`), listing only the user's own; as `profile_sorted`,
+    /// only the listing, and nothing moves while it is on.
+    profile_mine_only: bool = false,
     /// The open profile row's Move up, Move down and Hide/Show buttons,
     /// children of the Profiles list over that row, made the first time a
     /// profile's row opens (`syncProfileButtons`), and their UIA providers.
@@ -2596,6 +2610,8 @@ pub const SettingsWindow = struct {
     /// Throws the draft away and shows what is saved, without closing.
     btn_discard_changes: ?HWND = null,
     btn_keybindings_editor: ?HWND = null,
+    btn_profile_sort: ?HWND = null,
+    btn_profile_detected: ?HWND = null,
     btn_conflict_keep: ?HWND = null,
     btn_conflict_use_disk: ?HWND = null,
     btn_close_keep_editing: ?HWND = null,
@@ -5355,6 +5371,7 @@ pub const SettingsWindow = struct {
         if (self.sectionList(next)) |list| {
             self.refreshListShown(list, false);
             self.createList(list);
+            if (list.kind == .profiles) self.syncProfileListButtons();
             // Held as the rest of the page is, while no draft is there.
             if (self.owes_draft) self.holdDraftControls();
         }
@@ -7721,6 +7738,7 @@ pub const SettingsWindow = struct {
             self.ensureListModel(list);
             self.refreshListShown(list, true);
             self.createList(list);
+            if (list.kind == .profiles) self.syncProfileListButtons();
         }
         stamps.mark(.create_refresh);
 
@@ -8310,8 +8328,15 @@ pub const SettingsWindow = struct {
             var it = profile_dialog.VariableIterator.init(p.variables);
             while (it.next()) |variable| {
                 if (variable.name.len == 0) return .{ .field = .variables, .message = "Type each variable as NAME=VALUE, one a line." };
-                if (isReservedVariable(variable.name)) return .{ .field = .variables, .message = "KORETERM_FONT_SIZE, KORETERM_TAB_COLOR, KORETERM_TAB_ICON and KORETERM_ELEVATED are the window's own fields: set them above." };
+                if (isReservedVariable(variable.name)) return .{ .field = .variables, .message = "KORETERM_FONT_SIZE, KORETERM_TAB_COLOR, KORETERM_TAB_ICON, KORETERM_ELEVATED and KORETERM_NOTES are the window's own fields: set them above." };
                 if (variable.value.len == 0) return .{ .field = .variables, .message = "A variable needs a value after its =." };
+            }
+            if (p.notes.len != 0) {
+                var buf: [LineIterator.max_line_len * 2]u8 = undefined;
+                var fixed: std.heap.FixedBufferAllocator = .init(&buf);
+                const encoded = profile_dialog.encodeNotes(fixed.allocator(), p.notes) catch
+                    return .{ .field = .notes, .message = "The notes are too long for one line of the config file." };
+                if (settings_profiles.checkVariableValue(self.id, windows_shell.notes_env, encoded)) |message| return .{ .field = .notes, .message = message };
             }
             return null;
         }
@@ -8321,7 +8346,8 @@ pub const SettingsWindow = struct {
         return std.ascii.eqlIgnoreCase(name, windows_shell.font_size_env) or
             std.ascii.eqlIgnoreCase(name, windows_shell.elevated_env) or
             std.ascii.eqlIgnoreCase(name, windows_shell.tab_color_env) or
-            std.ascii.eqlIgnoreCase(name, windows_shell.tab_icon_env);
+            std.ascii.eqlIgnoreCase(name, windows_shell.tab_icon_env) or
+            std.ascii.eqlIgnoreCase(name, windows_shell.notes_env);
     }
 
     /// The command line the profile `key` starts, as the app lists it (a
@@ -8377,6 +8403,8 @@ pub const SettingsWindow = struct {
                     fields.tab_color = a.dupe(u8, variable.value) catch return self.profileChangeFailed();
                 } else if (std.ascii.eqlIgnoreCase(variable.name, windows_shell.tab_icon_env)) {
                     fields.tab_icon = a.dupe(u8, variable.value) catch return self.profileChangeFailed();
+                } else if (std.ascii.eqlIgnoreCase(variable.name, windows_shell.notes_env)) {
+                    fields.notes = profile_dialog.decodeNotes(a, variable.value) catch return self.profileChangeFailed();
                 } else {
                     variables.writer.print("{s}={s}\n", .{ variable.name, variable.value }) catch return self.profileChangeFailed();
                 }
@@ -8393,6 +8421,7 @@ pub const SettingsWindow = struct {
             .tab_icon = a.dupe(u8, given.tab_icon) catch return self.profileChangeFailed(),
             .elevated = given.elevated,
             .variables = a.dupe(u8, given.variables) catch return self.profileChangeFailed(),
+            .notes = a.dupe(u8, given.notes) catch return self.profileChangeFailed(),
         };
         var check: ProfileWindowCheck = .{ .id = existing_id orelse "profile" };
         const title = if (existing_id == null) std.unicode.utf8ToUtf16LeStringLiteral("New profile") else std.unicode.utf8ToUtf16LeStringLiteral("Edit profile");
@@ -8412,7 +8441,7 @@ pub const SettingsWindow = struct {
                 return self.setProfileNote(.refused, "Error: the profile could not be added.", .{});
         };
         settings_profiles.setField(draft, .folder, id, fields.folder) catch return self.profileChangeFailed();
-        // Variables: the ones typed, then the window's own two; any the
+        // Variables: the ones typed, then the window's own; any the
         // profile had and the field left out go.
         var kept: std.ArrayListUnmanaged([]const u8) = .empty;
         var it = profile_dialog.VariableIterator.init(fields.variables);
@@ -8437,6 +8466,11 @@ pub const SettingsWindow = struct {
         if (fields.tab_icon.len != 0) {
             settings_profiles.setVariable(draft, id, windows_shell.tab_icon_env, fields.tab_icon) catch return self.profileChangeFailed();
             kept.append(a, windows_shell.tab_icon_env) catch return self.profileChangeFailed();
+        }
+        if (fields.notes.len != 0) {
+            const encoded = profile_dialog.encodeNotes(a, fields.notes) catch return self.profileChangeFailed();
+            settings_profiles.setVariable(draft, id, windows_shell.notes_env, encoded) catch return self.profileChangeFailed();
+            kept.append(a, windows_shell.notes_env) catch return self.profileChangeFailed();
         }
         for (old_variables.items) |name| {
             const still = for (kept.items) |other| {
@@ -9084,9 +9118,12 @@ pub const SettingsWindow = struct {
         // Disabled too while another layer sets the lists (`listsForeign`).
         const takes = self.draftTakesEdits() and self.profileListsRefused() == null;
         const partial = !model.complete and !profile.found_hidden;
+        // Not while the list is A to Z or leaves profiles out: a move is in
+        // the picker's whole order.
+        const moves = takes and self.profileListShowsPickerOrder();
         const enabled = [profile_button_count]bool{
-            takes and (partial or model.moveTarget(row.profile, -1) != null),
-            takes and (partial or model.moveTarget(row.profile, 1) != null),
+            moves and (partial or model.moveTarget(row.profile, -1) != null),
+            moves and (partial or model.moveTarget(row.profile, 1) != null),
             takes and (partial or (model.complete and !profile.found_hidden)),
         };
         const y = list.buttonsTop(metrics, position);
@@ -9504,13 +9541,16 @@ pub const SettingsWindow = struct {
                     return MF_STRING | if (on) 0 else MF_GRAYED;
                 }
             }.of;
-            _ = sys.AppendMenuW(menu, flags(takes and (partial or model.moveTarget(row.profile, -1) != null)), profile_menu_up, std.unicode.utf8ToUtf16LeStringLiteral("Move &up\tAlt+Up"));
-            _ = sys.AppendMenuW(menu, flags(takes and (partial or model.moveTarget(row.profile, 1) != null)), profile_menu_down, std.unicode.utf8ToUtf16LeStringLiteral("Move &down\tAlt+Down"));
+            const moves = takes and self.profileListShowsPickerOrder();
+            _ = sys.AppendMenuW(menu, flags(moves and (partial or model.moveTarget(row.profile, -1) != null)), profile_menu_up, std.unicode.utf8ToUtf16LeStringLiteral("Move &up\tAlt+Up"));
+            _ = sys.AppendMenuW(menu, flags(moves and (partial or model.moveTarget(row.profile, 1) != null)), profile_menu_down, std.unicode.utf8ToUtf16LeStringLiteral("Move &down\tAlt+Down"));
             _ = sys.AppendMenuW(menu, flags(takes and (partial or (model.complete and !profile.found_hidden))), profile_menu_hide, if (profile.hidden)
                 std.unicode.utf8ToUtf16LeStringLiteral("&Show in the picker\tCtrl+H")
             else
                 std.unicode.utf8ToUtf16LeStringLiteral("&Hide in the picker\tCtrl+H"));
         };
+        _ = sys.AppendMenuW(menu, MF_STRING | @as(UINT, if (self.profile_sorted) MF_CHECKED else 0), profile_menu_sort, std.unicode.utf8ToUtf16LeStringLiteral("&Sort A to Z"));
+        _ = sys.AppendMenuW(menu, MF_STRING | @as(UINT, if (self.profile_mine_only) MF_CHECKED else 0), profile_menu_mine, std.unicode.utf8ToUtf16LeStringLiteral("Only &my profiles"));
         if (row.kind != .new_profile) _ = sys.AppendMenuW(menu, MF_STRING, profile_menu_new, std.unicode.utf8ToUtf16LeStringLiteral("&New profile\tInsert"));
         if (self.profile_model.profileOf(row)) |profile| if (!profile.found_hidden) {
             const takes: UINT = if (self.draftTakesEdits()) 0 else MF_GRAYED;
@@ -9535,6 +9575,8 @@ pub const SettingsWindow = struct {
             reference_menu_edit => _ = self.profileInvoke(),
             reference_menu_copy => self.profileDelete(),
             profile_menu_new => self.profileNew(),
+            profile_menu_sort => self.profileToggleSort(),
+            profile_menu_mine => self.profileToggleDetected(),
             profile_menu_up => self.profileMove(-1),
             profile_menu_down => self.profileMove(1),
             profile_menu_hide => self.profileToggleHidden(),
@@ -9547,6 +9589,66 @@ pub const SettingsWindow = struct {
             reference_menu_open => self.handle.openInEditor(self.handle.ctx),
             else => {},
         }
+    }
+
+    /// The List order button, or the list menu's Sort A to Z: the Profiles
+    /// list A to Z, or in the picker's order again. Only the page's listing
+    /// changes; the draft does not, so there is nothing to save. The
+    /// selection stays on its row (`Row.identity`).
+    fn profileToggleSort(self: *SettingsWindow) void {
+        if (!self.profileEditDone()) return;
+        self.profile_sorted = !self.profile_sorted;
+        self.profileListingChanged();
+        if (self.profile_sorted)
+            self.setProfileNote(.said, "Profiles listed A to Z. The picker keeps its own order; Picker order shows it again, and a profile moves there.", .{})
+        else
+            self.setProfileNote(.said, "Profiles listed in the picker's order.", .{});
+    }
+
+    /// The Built-in profiles button: the Profiles list with the profiles
+    /// koreterm finds, or only the user's own. Only the listing changes.
+    fn profileToggleDetected(self: *SettingsWindow) void {
+        if (!self.profileEditDone()) return;
+        self.profile_mine_only = !self.profile_mine_only;
+        self.profileListingChanged();
+        if (self.profile_mine_only)
+            self.setProfileNote(.said, "Only your own profiles are listed. Show built-in profiles lists the ones koreterm finds again; a profile moves with them all listed.", .{})
+        else
+            self.setProfileNote(.said, "Built-in profiles are listed again.", .{});
+    }
+
+    /// The Profiles list listed again for its order and filter, from the
+    /// top, and its buttons in step.
+    fn profileListingChanged(self: *SettingsWindow) void {
+        self.syncProfileListButtons();
+        if (self.active_section != .profiles) return;
+        self.refreshListShown(&self.profile_list, true);
+        self.syncProfileButtons();
+        if (self.profile_list.hwnd) |list| _ = InvalidateRect(list, null, 0);
+        // A search that found only built-in rows may now find none: the
+        // page shows or hides its list as it does after a search.
+        if (self.profile_list.hwnd) |list| setChildShown(list, self.profileListShows());
+        layoutChildren(self);
+    }
+
+    /// Whether the Profiles list shows the picker's whole order, so a
+    /// profile can move: not A to Z, and not without the built-in ones.
+    fn profileListShowsPickerOrder(self: *const SettingsWindow) bool {
+        return !self.profile_sorted and !self.profile_mine_only;
+    }
+
+    /// The page's List order and Built-in profiles buttons say what a click
+    /// shows. A page made again (`materializeSection`) starts with the
+    /// specs' captions, so the list's creation calls this too.
+    fn syncProfileListButtons(self: *SettingsWindow) void {
+        if (self.btn_profile_sort) |button| _ = syncButtonText(button, if (self.profile_sorted)
+            std.unicode.utf8ToUtf16LeStringLiteral("Picker order")
+        else
+            std.unicode.utf8ToUtf16LeStringLiteral("Sort A to Z"));
+        if (self.btn_profile_detected) |button| _ = syncButtonText(button, if (self.profile_mine_only)
+            std.unicode.utf8ToUtf16LeStringLiteral("Show built-in profiles")
+        else
+            std.unicode.utf8ToUtf16LeStringLiteral("Hide built-in profiles"));
     }
 
     /// Alt+Up or Alt+Down (`step` -1 or 1), or Move up or Move down: the
@@ -9565,6 +9667,8 @@ pub const SettingsWindow = struct {
         if (!self.profileEditDone()) return;
         const row = self.selectedProfileRow() orelse return;
         if (row.kind == .new_profile) return;
+        if (self.profile_sorted) return self.setProfileNote(.said, "The list is A to Z: Picker order shows the order a profile moves in.", .{});
+        if (self.profile_mine_only) return self.setProfileNote(.said, "Built-in profiles are left out of the list: Show built-in profiles lists the whole order a profile moves in.", .{});
         if (!self.wholeProfileList(row.identity)) return self.setProfileNote(.said, "koreterm is looking for the profiles on this computer: the order can be changed once it has them all.", .{});
         const model = &self.profile_model;
         const row_now = self.selectedProfileRow() orelse return;
@@ -9740,9 +9844,13 @@ pub const SettingsWindow = struct {
             // The Profiles page lists one title row a profile; its fields
             // are edited in the profile's window (`profileEditWindow`).
             if (list.kind == .profiles and !self.profile_fields_shown and self.profile_model.rows[id].kind.isField()) continue;
+            // Only the user's own (`profile_mine_only`): a found profile's
+            // one row goes.
+            if (list.kind == .profiles and self.profile_mine_only) if (self.profile_model.profileOf(self.profile_model.rows[id])) |profile| if (profile.detected) continue;
             list.shown[count] = @intCast(id);
             count += 1;
         }
+        if (list.kind == .profiles and self.profile_sorted) self.profile_model.sortShown(list.shown[0..count]);
         list.shown_count = count;
         if (from_top) list.scroll_y = 0;
         list.contentChanged();
@@ -14044,7 +14152,7 @@ fn layoutChildren(self: *SettingsWindow) void {
     // The form, in viewport coordinates.
     const form_items = self.formItems();
     var item_rects: [settings_max_form_items]SettingsFieldRects = undefined;
-    var extent_rects: [settings_max_form_items * 2 + 2]RECT = undefined;
+    var extent_rects: [settings_max_form_items * 2 + 3]RECT = undefined;
     var extent_count: usize = 0;
     settingsFormItemRects(form_items, form_width, self.dpi, item_rects[0..form_items.len]);
     for (form_items, 0..) |item, index| {
@@ -14075,6 +14183,20 @@ fn layoutChildren(self: *SettingsWindow) void {
     // a few rows it keeps that height, and the page scrolls to it
     // (`ensureControlVisible` when it takes the focus).
     var keybind_rect: ?RECT = null;
+    // The Profiles page's list, below its List order row the same way (that
+    // row hidden by a search, at the top).
+    var profile_rect: ?RECT = null;
+    if (self.profile_list.hwnd != null and self.profileListShows()) {
+        var top: i32 = 0;
+        for (extent_rects[0..extent_count]) |extent| top = @max(top, extent.bottom);
+        if (top > 0) top += self.px(settings_field_row_pitch) - self.px(settings_control_height);
+        const min_height = self.px(settings_keybind_list_min_height);
+        profile_rect = .{ .left = 0, .top = top, .right = column_width, .bottom = top + @max(min_height, viewport_height - top) };
+        if (viewport_height - top < min_height) {
+            extent_rects[extent_count] = profile_rect.?;
+            extent_count += 1;
+        }
+    }
     if (self.keybind_list.hwnd != null and self.keybindListShows()) {
         var top: i32 = 0;
         for (extent_rects[0..extent_count]) |extent| top = @max(top, extent.bottom);
@@ -14140,9 +14262,7 @@ fn layoutChildren(self: *SettingsWindow) void {
     if (self.reference_list.hwnd) |list| if (self.referenceListShows()) {
         form.add(list, gutter, 0, column_width, viewport_height);
     };
-    if (self.profile_list.hwnd) |list| if (self.profileListShows()) {
-        form.add(list, gutter, 0, column_width, viewport_height);
-    };
+    if (profile_rect) |placed| form.add(self.profile_list.hwnd.?, gutter + placed.left, placed.top - scroll_y, placed.right - placed.left, placed.bottom - placed.top);
     if (keybind_rect) |placed| form.add(self.keybind_list.hwnd.?, gutter + placed.left, placed.top - scroll_y, placed.right - placed.left, placed.bottom - placed.top);
 
     const row_top = action_bar_top + action_bar.actions_top;
@@ -22050,6 +22170,14 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
                 if (owner) |o| o.resetButtonClicked(id - BTN_RESET_FIRST, lParam);
                 return 0;
             }
+            if (clickedButton(id, notify, BTN_PROFILE_SORT)) {
+                if (owner) |o| o.profileToggleSort();
+                return 0;
+            }
+            if (clickedButton(id, notify, BTN_PROFILE_DETECTED)) {
+                if (owner) |o| o.profileToggleDetected();
+                return 0;
+            }
             if (clickedButton(id, notify, BTN_OPEN_EDITOR) or clickedButton(id, notify, BTN_KEYBINDINGS_EDITOR)) {
                 if (owner) |o| o.handle.openInEditor(o.handle.ctx);
                 return 0;
@@ -22266,6 +22394,8 @@ const profile_menu_backup: usize = 11;
 const profile_menu_new_rdp: usize = 12;
 const profile_menu_based: usize = 13;
 const profile_menu_delete: usize = 14;
+const profile_menu_sort: usize = 15;
+const profile_menu_mine: usize = 16;
 /// What the Profiles list's UIA help text says: the keys it takes.
 const profile_list_help = "Up and Down move through the profiles, in the picker's order, and your profiles' fields: command line, name, starting folder and variables. " ++
     "Enter edits the selected field, Delete removes it (a profile asks twice), Insert or Ctrl+N adds a profile, Ctrl+I imports profiles from a Terminals export, Alt+Up and Alt+Down move a profile, Ctrl+H hides it or shows it, and Shift+F10 offers these. " ++
@@ -23370,6 +23500,12 @@ const ReferenceList = struct {
     fn paintRow(self: *ReferenceList, hdc: HDC, metrics: Metrics, row: RECT, key: u16, separator: bool) void {
         const settings = self.owner();
         const colors = settings.theme_adapter.colors;
+        // A profile koreterm finds (PowerShell, WSL, ...) on a band tinted
+        // with the accent, so the user's own stand apart; High Contrast
+        // keeps the system's colours.
+        if (self.kind == .profiles and !colors.high_contrast and key < settings.profile_model.rows.len) if (settings.profile_model.profileOf(settings.profile_model.rows[key])) |profile| if (profile.detected) {
+            fillSolid(hdc, row, gdi.blendColorRGB(colors.window_bg, colors.accent, detected_profile_tint));
+        };
         self.paintTitle(hdc, metrics, row, key, colors.text, if (self.emptyValue(key)) colors.secondary_text else colors.text);
         const line_text = self.summaryLine(key);
         var line_w: [512]u16 = undefined;
@@ -23441,6 +23577,9 @@ const ReferenceList = struct {
 };
 
 const DT_EXPANDTABS: u32 = 0x0040;
+/// How much of the accent a found profile's row takes over the pane's colour.
+const detected_profile_tint: f32 = 0.12;
+const gdi = @import("win32/gdi.zig");
 
 fn rectContains(rect: RECT, point: POINT) bool {
     return point.x >= rect.left and point.x < rect.right and point.y >= rect.top and point.y < rect.bottom;

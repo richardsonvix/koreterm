@@ -1,11 +1,11 @@
 //! The modal window that edits one terminal profile of the Profiles page:
 //! its name, command line, starting folder, zoom (font size), its tab's
-//! color and icon, whether it opens as administrator, and its variables
-//! (one `NAME=VALUE` a line). Settings checks what it returns and writes it
-//! into the draft; the zoom, the tab color and icon and the administrator
-//! choice are kept as the profile's reserved variables
-//! (`windows_shell.font_size_env`, `tab_color_env`, `tab_icon_env`,
-//! `elevated_env`).
+//! color and icon, whether it opens as administrator, its variables (one
+//! `NAME=VALUE` a line) and its notes. Settings checks what it returns and
+//! writes it into the draft; the zoom, the tab color and icon, the
+//! administrator choice and the notes are kept as the profile's reserved
+//! variables (`windows_shell.font_size_env`, `tab_color_env`,
+//! `tab_icon_env`, `elevated_env`, `notes_env`).
 //!
 //! Nothing here logs a value the person typed.
 const std = @import("std");
@@ -43,6 +43,8 @@ pub const Profile = struct {
     tab_icon: []const u8 = "",
     elevated: bool = false,
     variables: []const u8 = "",
+    /// Free text, any number of lines; empty for none.
+    notes: []const u8 = "",
 };
 
 /// Checks the caller makes on OK: a message for the person, and the field
@@ -52,7 +54,7 @@ pub const Check = struct {
     run: *const fn (ctx: *anyopaque, profile: *const Profile) ?Refusal,
 };
 pub const Refusal = struct { field: Field, message: []const u8 };
-pub const Field = enum { name, command, folder, font_size, tab_color, tab_icon, variables };
+pub const Field = enum { name, command, folder, font_size, tab_color, tab_icon, variables, notes };
 
 extern "user32" fn DialogBoxIndirectParamW(hInstance: ?HINSTANCE, template: *const anyopaque, parent: ?HWND, proc: *const fn (HWND, UINT, WPARAM, LPARAM) callconv(.winapi) isize, init: LPARAM) callconv(.winapi) isize;
 extern "user32" fn EndDialog(hDlg: HWND, result: isize) callconv(.winapi) BOOL;
@@ -97,6 +99,7 @@ const id_tab_color: u16 = 126;
 const id_tab_color_pick: u16 = 127;
 const id_tab_icon: u16 = 128;
 const id_tab_icon_browse: u16 = 129;
+const id_notes: u16 = 130;
 
 const DWLP_USER: i32 = @sizeOf(usize) * 2;
 const WM_INITDIALOG: UINT = 0x0110;
@@ -151,6 +154,8 @@ const Template = struct {
 };
 
 fn buildTemplate(alloc: Allocator) Allocator.Error![]align(4) u8 {
+    // Its labels are UTF-16 literals made at compile time.
+    @setEvalBranchQuota(4000);
     var t: Template = .{ .alloc = alloc };
     defer t.bytes.deinit(alloc);
     const WS_CHILD: u32 = 0x40000000;
@@ -171,11 +176,11 @@ fn buildTemplate(alloc: Allocator) Allocator.Error![]align(4) u8 {
     const static: u16 = 0x0082;
 
     const w: i16 = 320;
-    const h: i16 = 282;
+    const h: i16 = 302;
     const label_w: i16 = 86;
     const field_x: i16 = 7 + label_w + 4;
     const field_w: i16 = w - field_x - 7;
-    const count: u16 = 6 * 2 + 1 + 1 + 3 + 2 + 2 + 2;
+    const count: u16 = 6 * 2 + 1 + 1 + 3 + 2 + 2 + 2 + 2;
     try t.int(u32, 0x80000000 | 0x00C00000 | 0x00080000 | 0x80 | 0x40 | 0x800);
     try t.int(u32, 0);
     try t.int(u16, count);
@@ -215,6 +220,9 @@ fn buildTemplate(alloc: Allocator) Allocator.Error![]align(4) u8 {
     try t.item(child, 7, y + 2, label_w, 9, 0xFFFF, static, L("&Variables"));
     try t.item(child | WS_TABSTOP | WS_GROUP | WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN, field_x, y, field_w, 60, id_variables, edit_atom, L(""));
     try t.item(child, field_x, y + 62, field_w, 9, 0xFFFF, static, L("One NAME=VALUE a line."));
+    y += 76;
+    try t.item(child, 7, y + 2, label_w, 9, 0xFFFF, static, L("N&otes"));
+    try t.item(child | WS_TABSTOP | WS_GROUP | WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN, field_x, y, field_w, 52, id_notes, edit_atom, L(""));
     try t.item(child | WS_TABSTOP | WS_GROUP | BS_DEFPUSHBUTTON, w - 7 - 50 - 4 - 50, h - 21, 50, 14, IDOK, button, L("OK"));
     try t.item(child | WS_TABSTOP, w - 7 - 50, h - 21, 50, 14, IDCANCEL, button, L("Cancel"));
 
@@ -266,6 +274,7 @@ fn controlId(field: Field) u16 {
         .tab_color => id_tab_color,
         .tab_icon => id_tab_icon,
         .variables => id_variables,
+        .notes => id_notes,
     };
 }
 
@@ -284,6 +293,7 @@ fn dialogProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(.w
             setText(hwnd, id_tab_color, a, p.tab_color);
             setText(hwnd, id_tab_icon, a, p.tab_icon);
             setText(hwnd, id_variables, a, p.variables);
+            setText(hwnd, id_notes, a, p.notes);
             if (GetDlgItem(hwnd, id_elevated)) |box| _ = SendMessageW(box, BM_SETCHECK, @intFromBool(p.elevated), 0);
             return 1;
         },
@@ -302,6 +312,7 @@ fn dialogProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(.w
                         .tab_icon = readText(hwnd, id_tab_icon, a) orelse return 1,
                         .elevated = if (GetDlgItem(hwnd, id_elevated)) |box| SendMessageW(box, BM_GETCHECK, 0, 0) == 1 else false,
                         .variables = readText(hwnd, id_variables, a) orelse return 1,
+                        .notes = readText(hwnd, id_notes, a) orelse return 1,
                     };
                     if (state.check.run(state.check.ctx, &typed)) |refusal| {
                         const message = std.unicode.utf8ToUtf16LeAllocZ(a, refusal.message) catch return 1;
@@ -392,11 +403,77 @@ pub const VariableIterator = struct {
     }
 };
 
+/// `notes` as one config line's value (`windows_shell.notes_env`): a line
+/// break (CRLF, LF or a lone CR) is `\n`, a backslash `\\` and a quote `\"`,
+/// so the value holds no line break and never starts or ends with a quote
+/// the reader would take off. `decodeNotes` reads it back. In `alloc`.
+pub fn encodeNotes(alloc: Allocator, notes: []const u8) Allocator.Error![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(alloc);
+    var i: usize = 0;
+    while (i < notes.len) : (i += 1) {
+        switch (notes[i]) {
+            '\r' => {
+                if (i + 1 < notes.len and notes[i + 1] == '\n') i += 1;
+                try out.appendSlice(alloc, "\\n");
+            },
+            '\n' => try out.appendSlice(alloc, "\\n"),
+            '\\' => try out.appendSlice(alloc, "\\\\"),
+            '"' => try out.appendSlice(alloc, "\\\""),
+            else => |byte| try out.append(alloc, byte),
+        }
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+/// What `encodeNotes` wrote, with each `\n` a line break (LF; the field
+/// shows it as CRLF). An escape it does not write is kept as written. In
+/// `alloc`.
+pub fn decodeNotes(alloc: Allocator, value: []const u8) Allocator.Error![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(alloc);
+    var i: usize = 0;
+    while (i < value.len) : (i += 1) {
+        if (value[i] == '\\' and i + 1 < value.len) {
+            const next = value[i + 1];
+            const byte: ?u8 = switch (next) {
+                'n' => '\n',
+                '\\' => '\\',
+                '"' => '"',
+                else => null,
+            };
+            if (byte) |b| {
+                try out.append(alloc, b);
+                i += 1;
+                continue;
+            }
+        }
+        try out.append(alloc, value[i]);
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+test "profile dialog: notes go into one line and come back" {
+    const alloc = std.testing.allocator;
+    const notes = "\"VPN\" first\r\nthen C:\\work\nlast\rline";
+    const encoded = try encodeNotes(alloc, notes);
+    defer alloc.free(encoded);
+    try std.testing.expectEqualStrings("\\\"VPN\\\" first\\nthen C:\\\\work\\nlast\\nline", encoded);
+    try std.testing.expect(std.mem.indexOfAny(u8, encoded, "\r\n") == null);
+    const decoded = try decodeNotes(alloc, encoded);
+    defer alloc.free(decoded);
+    try std.testing.expectEqualStrings("\"VPN\" first\nthen C:\\work\nlast\nline", decoded);
+    // An escape it does not write stays as written.
+    const odd = try decodeNotes(alloc, "a\\tb\\");
+    defer alloc.free(odd);
+    try std.testing.expectEqualStrings("a\\tb\\", odd);
+}
+
 test "profile dialog: the template is DWORD aligned and counts its items" {
     const template = try buildTemplate(std.testing.allocator);
     defer std.testing.allocator.free(template);
     try std.testing.expectEqual(@as(usize, 0), @intFromPtr(template.ptr) % 4);
-    try std.testing.expectEqual(@as(u16, 23), std.mem.readInt(u16, template[8..10], .little));
+    try std.testing.expectEqual(@as(u16, 25), std.mem.readInt(u16, template[8..10], .little));
 }
 
 test "profile dialog: CHOOSECOLORW matches the SDK" {
