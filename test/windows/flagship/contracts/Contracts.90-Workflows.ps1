@@ -24,15 +24,6 @@ Invoke-ContractTable -Contracts @(
         Description = 'dependency-free site asset and recursively discovered unit-test gates run in fail-closed order'
     }
     @{
-        File = "$testWorkflow :: Remote release copy checks"
-        Content = {
-            (Get-YamlStepBlock -Content $testWorkflowText -Name 'Remote release copy checks' -Source $testWorkflow)
-        }
-        Pattern = '(?ms)env:\s+GH_TOKEN: \$\{\{ github\.token \}\}.*?CheckRemoteLatest'
-        Kind = 'Text'
-        Description = 'scheduled remote verification authenticates gh'
-    }
-    @{
         File = "$releaseWorkflow :: windows-release :: Setup Zig"
         Content = {
             (Get-YamlStepBlock `

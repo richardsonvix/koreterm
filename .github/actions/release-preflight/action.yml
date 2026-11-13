@@ -1,12 +1,12 @@
 name: Release preflight
-description: Validate release copy, signing, and package-manager configuration.
+description: Validate signing and package-manager configuration.
 
 inputs:
   version:
     description: Release version without a leading v.
     required: true
   prerelease:
-    description: Whether stable release-copy validation may be skipped.
+    description: Whether the release is a prerelease.
     required: true
   require-package-managers:
     description: Whether WinGet and Scoop configuration is required.
@@ -38,9 +38,5 @@ runs:
           Version = $env:RELEASE_VERSION
           RequireSigning = $true
           RequirePackageManagers = $env:REQUIRE_PACKAGE_MANAGERS -eq 'true'
-        }
-        if ($env:RELEASE_PRERELEASE -ne 'true') {
-          ./scripts/check-release-copy.ps1 -ExpectedVersion $env:RELEASE_VERSION
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         }
         ./scripts/release-preflight.ps1 @preflightArgs

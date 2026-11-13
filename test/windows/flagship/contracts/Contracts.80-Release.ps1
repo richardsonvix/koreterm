@@ -1357,18 +1357,18 @@ Invoke-ContractTable -Contracts @(
         Content = {
             $releasePreflightStep
         }
-        Pattern = '(?ms)GH_TOKEN: \$\{\{ inputs\.github-token \}\}.*?SCOOP_BUCKET_TOKEN: \$\{\{ inputs\.scoop-bucket-token \}\}.*?WINGETCREATE_TOKEN: \$\{\{ inputs\.wingetcreate-token \}\}.*?check-release-copy\.ps1 -ExpectedVersion.*?\r?\n\s+if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}.*?release-preflight\.ps1 @preflightArgs'
+        Pattern = '(?ms)GH_TOKEN: \$\{\{ inputs\.github-token \}\}.*?SCOOP_BUCKET_TOKEN: \$\{\{ inputs\.scoop-bucket-token \}\}.*?WINGETCREATE_TOKEN: \$\{\{ inputs\.wingetcreate-token \}\}.*?release-preflight\.ps1 @preflightArgs'
         Kind = 'Text'
-        Description = 'shared preflight propagates release-copy failures before exact release validation'
+        Description = 'shared preflight passes the release tokens to exact release validation'
     }
     @{
-        File = "$releaseWorkflow :: Verify published release copy and assets"
+        File = "$releaseWorkflow :: Verify published release assets"
         Content = {
-            (Get-YamlStepBlock -Content $releaseWorkflowText -Name 'Verify published release copy and assets' -Source $releaseWorkflow)
+            (Get-YamlStepBlock -Content $releaseWorkflowText -Name 'Verify published release assets' -Source $releaseWorkflow)
         }
-        Pattern = '(?ms)env:\s+GH_TOKEN: \$\{\{ github\.token \}\}.*?CheckRemoteLatest.*?if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}.*?verify-published-release\.ps1 -Version \$env:RELEASE_VERSION.*?if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}'
+        Pattern = '(?ms)env:\s+GH_TOKEN: \$\{\{ github\.token \}\}.*?verify-published-release\.ps1 -Version \$env:RELEASE_VERSION.*?if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}'
         Kind = 'Text'
-        Description = 'post-publish remote verification authenticates gh and fails closed on copy and byte/signature checks'
+        Description = 'post-publish remote verification authenticates gh and fails closed on byte/signature checks'
     }
     @{
         File = "$releaseWorkflow :: Publish GitHub Release"

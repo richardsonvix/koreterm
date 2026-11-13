@@ -59,7 +59,7 @@ $script:CiPathRules = @(
     @{ Needs = 'none'; Pattern = '^\.greptile/' }
     @{ Needs = 'none'; Pattern = '^\.agents/' }
     @{ Needs = 'none'; Pattern = '^\.github/(ISSUE_TEMPLATE/|pull_request_template\.md$|PULL_REQUEST_TEMPLATE/|dependabot\.yml$|CODEOWNERS$)' }
-    @{ Needs = 'none'; Pattern = '^\.github/workflows/(deploy-site|release|release-readiness)\.yml$' }
+    @{ Needs = 'none'; Pattern = '^\.github/workflows/(release|release-readiness)\.yml$' }
     @{ Needs = 'none'; Pattern = '^CODEOWNERS$' }
     @{ Needs = 'none'; Pattern = '^(typos\.toml|\.gitignore|\.prettierignore)$' }
     # README.md and LICENSE are copied into the portable package.
@@ -68,7 +68,7 @@ $script:CiPathRules = @(
     @{ Needs = 'package'; Pattern = '^images/' }
 
     # Scripts that only the checks job, the release workflows or a person run.
-    @{ Needs = 'none'; Pattern = '^scripts/(build-site-assets\.mjs|build-site-payload\.ps1|check-accessibility-evidence\.ps1|check-release-copy\.ps1|check-site-copy\.ps1|check-source-format\.ps1|fetch-zig-deps\.ps1|get-site-header-contract\.ps1|package-package-managers\.ps1|require-site-deployment-head\.ps1|test-release-copy-date\.ps1|test-signing-trust\.ps1|test-windows-build-capabilities\.ps1|update-release-copy\.ps1|upstream-drift\.ps1|verify-cloudflare-pages\.ps1|verify-published-release\.ps1)$' }
+    @{ Needs = 'none'; Pattern = '^scripts/(build-site-assets\.mjs|build-site-payload\.ps1|check-accessibility-evidence\.ps1|check-source-format\.ps1|fetch-zig-deps\.ps1|get-site-header-contract\.ps1|package-package-managers\.ps1|require-site-deployment-head\.ps1|test-signing-trust\.ps1|test-windows-build-capabilities\.ps1|update-release-copy\.ps1|upstream-drift\.ps1|verify-cloudflare-pages\.ps1|verify-published-release\.ps1)$' }
     @{ Needs = 'none'; Pattern = '^scripts/(release-[a-z-]+\.ps1|interactive-win11\.(ps1|cmd)|interactive-win11-window-lib\.ps1)$' }
     # Packaging only: dot-sourced by build-package-windows.ps1, package-windows.ps1
     # and the CLI harnesses package-portable-cli.ps1 runs (interactive-win11-lib),

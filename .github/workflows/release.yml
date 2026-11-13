@@ -373,15 +373,13 @@ jobs:
             -UpstreamBaseVersion $env:RELEASE_UPSTREAM_BASE_VERSION `
             -Prerelease $env:RELEASE_PRERELEASE
 
-      - name: Verify published release copy and assets
+      - name: Verify published release assets
         if: steps.meta.outputs.prerelease != 'true'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
         run: |
-          ./scripts/check-release-copy.ps1 -ExpectedVersion $env:RELEASE_VERSION -CheckRemoteLatest
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./scripts/verify-published-release.ps1 -Version $env:RELEASE_VERSION
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

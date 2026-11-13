@@ -33,7 +33,7 @@ reviews:
         Google Fonts and manual bundle/style query-string cache busting are intentional for the static Cloudflare Pages deploy. Flag them only when the referenced assets or cache-bust values are stale or broken.
     - path: "site/components/install/**"
       instructions: |
-        Install commands are guarded by scripts/check-site-copy.ps1. Do not replace the WinGet/Scoop command hierarchy when that check passes.
+        Install commands must match README.md and PACKAGING.md; koreterm publishes no WinGet, Scoop or Chocolatey package.
     - path: "site/components/hero/version-chip-color.jsx"
       instructions: |
         This is public static client code on Cloudflare Pages. Do not suggest embedding GitHub tokens in the browser; the intended release lookup behavior is unauthenticated fetch with sessionStorage caching, timeout, and explicit rate-limit bail-out.

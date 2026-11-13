@@ -1,11 +1,5 @@
 Invoke-ContractTable -Contracts @(
     @{
-        File = $releaseCopyChecker
-        Pattern = '\$global:LASTEXITCODE\s*=\s*0\s*$'
-        Kind = 'Workflow'
-        Description = 'release-copy success explicitly clears native exit state'
-    }
-    @{
         File = $releasePreflight
         Pattern = '\$minimumValidityDays -lt 180(?!\d)'
         Kind = 'Workflow'

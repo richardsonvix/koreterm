@@ -28,8 +28,6 @@ dependencies.
 
 ```powershell
 node --test site/tests/*.test.mjs
-pwsh -File scripts/check-site-copy.ps1
-pwsh -File scripts/check-release-copy.ps1
 ```
 
 The copy checks fail on claims the project cannot back: package-manager
@@ -85,56 +83,5 @@ the terminal shots are cropped to their top 600 rows. The social card,
 
 ## Deployment
 
-The Pages project is a Direct Upload project: there is no `wrangler.toml`
-and no Git-integrated build. `.github/workflows/deploy-site.yml` owns
-production. It runs on every push to `main`, on published stable releases,
-when a Release run completes, and on manual dispatch; pull requests do not
-deploy.
-
-Production takes a release copy only once GitHub has published that release,
-because the site links the release's downloads. While `README.md` names a
-version newer than the latest GitHub release (the release-copy merge, before
-its Release run publishes), the run holds the deploy and says so in a notice
-and in the job summary; the Release run's completion then deploys it. The
-Release workflow publishes with `GITHUB_TOKEN`, and an event made with
-`GITHUB_TOKEN` starts no workflow run, so `release: published` fires only for
-a release a person publishes. The workflow:
-
-1. Runs the site copy checks, the asset determinism check, the header
-   contract, and the release copy check against the latest GitHub release,
-   each in its own step.
-2. Builds the payload twice from an exact file allowlist
-   (`scripts/build-site-payload.ps1`) and requires identical SHA-256
-   manifests.
-3. Deploys the payload to a canary branch and verifies Cloudflare's
-   metadata, commit provenance, and every served byte. The
-   zone-owned `www` redirect is preflighted here, before anything reaches
-   production.
-4. Deploys the same payload to `main` and verifies it again at the
-   deployment URL and at `koreterm.com`.
-
-It needs the `cloudflare-pages-production` environment with
-`CLOUDFLARE_API_TOKEN` (Account / Cloudflare Pages / Edit) and
-`CLOUDFLARE_ACCOUNT_ID`.
-
-A failed production verification does not automatically roll back, because
-the Pages API has no compare-and-swap rollback and an automated one could
-overwrite a newer deployment. The run keeps redacted evidence as an
-artifact; pick a known-good deployment in the Cloudflare dashboard.
-
-The `www` to apex redirect is configured at the zone level (a Bulk Redirect
-or Redirect Rule with path and query preserved), not in a `_redirects` file,
-because Pages cannot express a domain-level redirect there. The
-workflow verifies the zone-level 301.
-
-To build the payload locally:
-
-```powershell
-$root = Join-Path $env:TEMP koreterm-site-payload
-pwsh -File scripts/build-site-payload.ps1 `
-  -OutputDirectory (Join-Path $root payload) `
-  -ManifestPath (Join-Path $root payload.sha256)
-```
-
-The deployment-only scripts require PowerShell 7.3 or newer and are
-outside the Windows PowerShell 5.1 harness compatibility scope.
+koreterm does not deploy this site. The Cloudflare Pages workflow came from the
+project koreterm is forked from and was removed with its release-copy checks.

@@ -366,8 +366,8 @@ test "portable managed script list parser rejects missing extra and duplicate en
 /// scripts/portable-manifest-verification.ps1 and scripts/package-windows.ps1
 /// must match `managed_entries`, which keeps the DLL while the updater manages
 /// retired copies (they permit it in a payload, they do not require it).
-/// And these verify releases that shipped the library: docs/verify-release.md,
-/// scripts/check-site-copy.ps1 and site/tests/trust.test.mjs. The lib-vt jobs
+/// And these verify releases that shipped the library: docs/verify-release.md
+/// and site/tests/trust.test.mjs. The lib-vt jobs
 /// in .github/workflows/test.yml stay while CI builds lib-vt; packaging
 /// stopped building it in 1.3.137.
 ///

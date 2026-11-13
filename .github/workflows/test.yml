@@ -126,29 +126,6 @@ jobs:
         shell: pwsh
         run: ./test/windows/bash-shell-integration.ps1
 
-      - name: Site copy checks
-        shell: pwsh
-        run: ./scripts/check-site-copy.ps1
-
-      - name: Release copy checks
-        shell: pwsh
-        run: ./scripts/check-release-copy.ps1
-
-      - name: Release copy UTC date tests (PowerShell 7)
-        shell: pwsh
-        run: ./scripts/test-release-copy-date.ps1
-
-      - name: Release copy UTC date tests (Windows PowerShell 5.1)
-        shell: powershell
-        run: ./scripts/test-release-copy-date.ps1
-
-      - name: Remote release copy checks
-        if: github.event_name == 'schedule'
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: ./scripts/check-release-copy.ps1 -CheckRemoteLatest
-
       - name: Setup Node.js
         uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
         with:

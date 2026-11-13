@@ -1,29 +1,46 @@
 # Privacy policy
 
-Last updated: 16 October 2026
+Last updated: 13 November 2026
 
 This policy covers Koreterm, the Windows terminal published by Richardson at
-[github.com/richardsonvix/noctty_terminal](https://github.com/richardsonvix/noctty_terminal): the app
-(installer, portable ZIP, and the `koreterm` command-line actions) and the
-[koreterm.com](https://github.com/richardsonvix/noctty_terminal) website. Package managers that install the
-published release files, such as Scoop or WinGet, install the same app.
+[github.com/richardsonvix/koreterm](https://github.com/richardsonvix/koreterm):
+the app (installer, portable ZIP, the `update.zip` update package, and the
+`koreterm` command-line actions). Koreterm has no website and is not published
+through package managers.
 
 ## In short
 
 - Koreterm has no telemetry, analytics, advertising, or accounts. It sends
   nothing to the maintainer, and the maintainer collects no personal data
   from it.
-- The only server Koreterm contacts on its own is GitHub (or an update feed you
-  set), to check for updates. You can turn that off.
+- Koreterm contacts no server on its own. It checks GitHub (or an update feed
+  you set) for updates only if you turn that on with `auto-update`; updates
+  otherwise come from an `update.zip` you put beside `koreterm.exe`.
+- The connections you save (Remote Desktop and SSH) connect only to the
+  servers you name, when you open them. Their passwords are kept by Windows,
+  never in the config file.
 - What Koreterm stores, such as your settings, your restorable session, recent
   folders, and crash dumps, stays on your PC. Koreterm uploads none of it.
 
 ## Network connections
 
-### Update checks (on by default)
+### Updates from a file (no network)
 
-- When Koreterm starts, it asks the GitHub API for the latest stable release,
-  unless a check succeeded in the last 24 hours. While a window stays open it
+- At start, Koreterm looks for an `update.zip` beside `koreterm.exe`. If its
+  `version.txt` names a newer version, Koreterm shows the package's
+  `whats-new.txt` and asks. **Update** closes Koreterm (saving the session),
+  and a small PowerShell script copies the package's program files over the
+  old ones, deletes the ZIP and starts Koreterm again. **Ignore** writes the
+  version to `update.ignored` beside the exe, so the same package does not ask
+  again. The package holds no data: your config, logins and session stay as
+  they are. Nothing is downloaded.
+
+### Update checks (off by default)
+
+- Koreterm checks for updates over the network only if you set
+  `auto-update = check` or `auto-update = download`. Then, when Koreterm
+  starts, it asks the GitHub API for the latest stable release of this
+  repository, unless a check succeeded in the last 24 hours. While a window stays open it
   tries again about every six hours, and still sends no request if a check
   succeeded in the last 24 hours. A failed check is retried at the next of
   those attempts or at the next start. Pre-release builds do not check on
@@ -41,7 +58,8 @@ published release files, such as Scoop or WinGet, install the same app.
   whether the copy is portable. While Koreterm verifies a download's
   signatures, Windows may contact the certificate issuers named in them to
   check for revoked certificates.
-- `auto-update = off` stops the automatic check. The `auto-update-feed-url`
+- Leaving `auto-update` unset, or setting it to `off`, means no automatic
+  check. The `auto-update-feed-url`
   setting or the `KORETERM_UPDATE_FEED_URL` environment variable sends checks
   to a feed you choose instead of GitHub, and downloads to the addresses that
   feed lists.
@@ -52,6 +70,15 @@ published release files, such as Scoop or WinGet, install the same app.
 
 ### Connections you or your programs start
 
+- **Remote Desktop.** A Remote Desktop profile connects, when you open it, to
+  the server it names, through the Remote Desktop control built into Windows
+  (the one `mstsc.exe` uses). Windows handles that connection, its sign-in
+  (CredSSP) and its encryption. While the session is open, the clipboard is
+  shared with the remote computer in both directions, as in `mstsc.exe`. The
+  session sends a keep-alive every minute, and after a network drop the tab
+  reconnects at most twice. Koreterm keeps no record of the session.
+- **Terminals import.** Importing from Terminals reads only the favorites
+  file you choose. It makes no network connection.
 - **Links.** Opening a link, such as a URL you click in the terminal or the
   update notice, hands it to your default browser or the app registered for
   that kind of link.
@@ -101,7 +128,8 @@ to `true`:
 
 - It sends no telemetry, usage statistics, or crash reports. Its crash dumps
   stay on your PC; Windows Error Reporting follows your Windows settings.
-- It has no accounts, sign-in, or cloud sync.
+- It has no accounts, sign-in, or cloud sync. The sign-ins it keeps are your
+  own logins to the servers in your profiles.
 - Its notifications are local Windows notifications; it uses no push service.
 - Apart from updates, it downloads nothing: no fonts, themes, or other
   content.
@@ -114,6 +142,23 @@ they live next to `koreterm.exe` instead. If you set `XDG_CONFIG_HOME`, your
 config goes there; if you set `XDG_STATE_HOME`, the update files, crash
 dumps, and SSH host cache go there.
 
+- **Saved logins:** the user name and password of a profile (from a Terminals
+  import or a profile's window) are never written to the config file. An
+  installed Koreterm keeps them in the Windows Credential Manager, one generic
+  credential per profile. A portable copy keeps them in
+  `credentials\<id>.cred` beside `koreterm.exe`, encrypted with DPAPI for your
+  Windows account, so they open only for you on that PC. Deleting a profile
+  does not delete its login: remove it as described below.
+- **Profiles:** the profiles you make are in the config file, with their
+  command lines, starting folders, environment variables, tab color and icon,
+  and notes. Notes are never passed to the programs a profile starts.
+- **Exports and backups you make:** **Export to Terminals file** writes the
+  profiles, *passwords included in plain text*, to the file you choose, and
+  **Back up all settings** writes a ZIP holding the config and state folders
+  (for a portable copy, its saved logins) and that same Terminals export, so
+  it also holds the passwords in plain text. Koreterm never sends either file
+  anywhere. Keep them somewhere safe and delete them when you no longer need
+  them.
 - **Config:** `config.ghostty`. If Koreterm finds no config at all, it creates
   a template here, with a comment giving the file's own path, which usually
   includes your Windows user name. The Settings window saves your changes
@@ -217,6 +262,9 @@ Koreterm writes these registry entries:
 - **Installer:** Start menu (and optional desktop) shortcuts, the "Open koreterm
   here" Explorer menu, the default-terminal handoff classes, and its uninstall
   entry. The uninstaller removes them.
+- **Shortcuts:** "Create Desktop and Start Menu Shortcuts" in the window menu
+  writes a `koreterm` shortcut to your Desktop and your Start menu. Delete them
+  by hand to remove them.
 - **Explorer menu for portable copies:** `koreterm +register-shell-menu` adds
   "Open koreterm here" for your account; `+unregister-shell-menu` removes it.
 - **Default terminal:** `koreterm +register-default-terminal` makes Koreterm the
@@ -246,6 +294,10 @@ installer created. It does not remove your data. To remove everything:
      `%APPDATA%\Microsoft\Windows\Recent\CustomDestinations`.
    - If you used them, run `koreterm +unregister-default-terminal`,
      `koreterm +unregister-shell-menu`, and `koreterm +ssh-cache --clear`.
+   - Delete your saved logins: in Windows' Credential Manager, under
+     **Windows Credentials**, remove each `koreterm:profile:<id>` entry. A
+     portable copy keeps them in its `credentials` folder instead, which
+     step 2 deletes.
 2. Close Koreterm and delete `%LOCALAPPDATA%\koreterm` (in portable mode, the files
    next to `koreterm.exe`), and the `koreterm` folders in `XDG_CONFIG_HOME` and
    `XDG_STATE_HOME` if you set them. Delete the `ghostty` and `winghostty`
@@ -260,31 +312,16 @@ installer created. It does not remove your data. To remove everything:
    `78\xterm-ghostty`, `67\ghostty`, and `.koreterm-installed`. Other programs
    may use that folder, so do not delete it whole.
 5. Delete any screen files and `ghostty-ssh-*` folders left in your temp
-   directory.
+   directory, and any Terminals exports and settings backups you made.
 
 If you used `ssh-terminfo`, the terminal description stays on the remote
 hosts it was installed on.
-
-## Website
-
-koreterm.com contains no analytics, advertising, or tracking, its own code
-sets no cookies, and it loads no third-party scripts or fonts. Its content
-security policy blocks them.
-
-- It is hosted on Cloudflare Pages. Like any web host, Cloudflare receives
-  your IP address and browser details when you load a page, and handles them
-  under the [Cloudflare Privacy Policy](https://www.cloudflare.com/privacypolicy/).
-- To show the current version, your browser asks the GitHub API for the
-  latest release, so GitHub sees your IP address and that the request came
-  from koreterm.com. The answer is kept in your browser's session storage and
-  reused for 30 minutes.
-- Your light or dark theme choice is kept in your browser's local storage.
 
 ## Changes and contact
 
 Changes to this policy are made in this file, so its history shows every
 change. Ask questions about it in
-[Discussions](https://github.com/richardsonvix/noctty_terminal/discussions), and report a
-privacy problem on the [issue tracker](https://github.com/richardsonvix/noctty_terminal/issues).
+[Discussions](https://github.com/richardsonvix/koreterm/discussions), and report a
+privacy problem on the [issue tracker](https://github.com/richardsonvix/koreterm/issues).
 Report security vulnerabilities privately, as described in
 [SECURITY.md](SECURITY.md).
