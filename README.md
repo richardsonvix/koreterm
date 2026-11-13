@@ -7,7 +7,7 @@
 <p align="center">
   <strong>A native Windows terminal built on Ghostty's terminal core, with Remote Desktop and SSH connections in its tabs.</strong>
   <br />
-  Tabs, splits and session restore · Remote Desktop tabs · Connection profiles · No telemetry
+  Tabs, splits and session restore · Remote Desktop tabs · Connection profiles · Light on memory · No telemetry
 </p>
 
 <p align="center">
@@ -34,6 +34,13 @@ editor in Settings.
 
 It runs on Windows only. It installs beside your current terminal and does
 not replace it.
+
+**Light on your PC.** koreterm is a native Win32 program with no browser
+engine inside, so it asks little of your machine while you use it. Measured
+on koreterm 1.3.142 (x64) with one Command Prompt tab open and idle: about
+55 MB of private memory (about 117 MB working set), and between 0.2% and
+2.5% of one CPU core, cursor blink included. The shell and the console host
+it starts are separate processes and are not counted.
 
 ## Features
 
