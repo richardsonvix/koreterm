@@ -1,3 +1,15 @@
+koreterm 1.3.143
+
+- Remote Desktop tabs: right-click the tab, "Run Command on Remote
+  Desktop...". Type a command (or pick Explorer, Processes, Services,
+  Events or Restart) and send it to the remote computer's Run box, to a
+  PowerShell window on its screen, or to PowerShell on the server through
+  WinRM, which shows whether it ran and its output. "Open Task Manager"
+  works even when the remote Explorer is gone. A restart or shutdown is
+  asked about first.
+- An applied update.zip is deleted, also when it was still in use while
+  the update ran.
+
 koreterm 1.3.142
 
 - Settings > Profiles: "Sort A to Z" lists the profiles alphabetically;

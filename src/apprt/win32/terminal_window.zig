@@ -168,6 +168,7 @@ const windows = win32.windows;
 const windows_shell = @import("../../config/windows_shell.zig");
 const tab_style = @import("tab_style.zig");
 const rdp_pane_mod = @import("rdp_pane.zig");
+const rdp_command_dialog = @import("rdp_command_dialog.zig");
 const profile_credentials = @import("profile_credentials.zig");
 const writeImeWindowFormsTrace = win32.writeImeWindowFormsTrace;
 
@@ -4161,6 +4162,7 @@ pub const Surface = struct {
             .ended = &rdpEnded,
             .released = &rdpReleased,
             .connected = &rdpConnected,
+            .sent = &rdpSent,
         });
         if (self.rdp_pane == null) self.showRdpNotice("Remote Desktop could not start: this Windows has no Remote Desktop control koreterm can host.");
     }
@@ -4193,6 +4195,65 @@ pub const Surface = struct {
     fn rdpConnected(ctx: *anyopaque) void {
         const self: *Surface = @ptrCast(@alignCast(ctx));
         self.showRdpNotice("Remote Desktop: the mouse and keys work inside it. Ctrl+Alt+Home gives the keyboard back to koreterm.");
+    }
+
+    /// A line typed into the remote Run box is done (`Pane.typeRunLine`).
+    fn rdpSent(ctx: *anyopaque, outcome: rdp_pane_mod.Sent) void {
+        const self: *Surface = @ptrCast(@alignCast(ctx));
+        self.showRdpNotice(switch (outcome) {
+            .run_line => "Sent to the remote desktop: Win+R, the command pasted, Enter. koreterm cannot see the remote screen: check that it started. The command is on this PC's clipboard too.",
+            .failed => "The keys did not all reach the remote desktop (it refused them, or the session went): the command may not have run.",
+        });
+    }
+
+    /// The tab menu's "Run Command on Remote Desktop...": the command window
+    /// (`rdp_command_dialog`), then what it asks for sent into the session.
+    /// A WinRM command has run, with its result shown, by the time it
+    /// returns.
+    pub fn openRdpCommandDialog(self: *Surface) void {
+        const pane = self.rdp_pane orelse return self.showRdpNotice("This tab has no Remote Desktop session open.");
+        const alloc = self.app.core_app.alloc;
+        var arena: std.heap.ArenaAllocator = .init(alloc);
+        defer arena.deinit();
+        const a = arena.allocator();
+        // Copies: the window's loop can end the session and free the pane.
+        const login = pane.remoting();
+        const server = a.dupe(u8, login.server) catch return;
+        const user = a.dupe(u8, login.user) catch return;
+        const password: ?[]u8 = if (login.password) |text| (a.dupe(u8, text) catch return) else null;
+        defer if (password) |text| @memset(text, 0);
+        const title = a.dupe(u8, self.effectiveTitle() orelse "") catch return;
+        const owner = self.windowHwnd();
+        const request = rdp_command_dialog.run(a, owner, .{
+            .server = server,
+            .user = user,
+            .password = password,
+            .title = title,
+        }) catch return self.showRdpNotice("The command window could not open.");
+        if (request == .none) return;
+        // The session the window was opened for, if it is still there.
+        const now = self.rdp_pane orelse return self.showRdpNotice("The Remote Desktop session ended: nothing was sent.");
+        switch (request) {
+            .none => {},
+            .task_manager => {
+                now.openTaskManager() catch |err| return self.rdpSendRefused(err);
+                self.showRdpNotice("Sent Ctrl+Shift+Esc: Task Manager opens on the remote desktop. To bring Explorer back: Run new task, explorer.exe.");
+            },
+            .run_line => |line| {
+                now.typeRunLine(line) catch |err| return self.rdpSendRefused(err);
+                self.showRdpNotice("Typing the command into the remote desktop's Run box...");
+            },
+        }
+    }
+
+    fn rdpSendRefused(self: *Surface, err: rdp_pane_mod.SendError) void {
+        self.showRdpNotice(switch (err) {
+            error.NotConnected => "The remote desktop is not connected right now: nothing was sent.",
+            error.Busy => "The previous command is still being typed: try again in a moment.",
+            error.ClipboardUnavailable => "Another program is holding the clipboard, which the command goes through: nothing was sent. Try again.",
+            error.KeysRefused => "The Remote Desktop control refused the keys: nothing was sent.",
+            error.OutOfMemory => "Out of memory: nothing was sent.",
+        });
     }
 
     fn showRdpNotice(self: *Surface, message: []const u8) void {

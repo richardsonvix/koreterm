@@ -430,6 +430,9 @@ pub const CTX_TAB_CLOSE_OTHERS: usize = 4022;
 pub const CTX_TAB_MOVE_LEFT: usize = 4023;
 pub const CTX_TAB_MOVE_RIGHT: usize = 4024;
 pub const CTX_TAB_NEW_PROFILE: usize = 4025;
+/// A Remote Desktop tab's "Run Command on Remote Desktop..."
+/// (`rdp_command_dialog.zig`).
+pub const CTX_TAB_RDP_COMMAND: usize = 4027;
 pub const CTX_PROFILE_BASE: usize = 4100; // profile dropdown items: CTX_PROFILE_BASE + index
 pub const CTX_SETTINGS: usize = 4013;
 pub const CTX_ABOUT: usize = 4014;

@@ -12,7 +12,13 @@
 //! The password comes from the Windows Credential Manager
 //! (`profile_credentials.zig`) and is handed to the control through
 //! `IMsTscNonScriptable::put_ClearTextPassword`. Nothing here logs a server,
-//! a user name or a password.
+//! a user name, a password or a command.
+//!
+//! The tab menu's "Run Command on Remote Desktop..." types into the session
+//! through `IMsRdpClientNonScriptable::SendKeys` (`Pane.typeRunLine`,
+//! `Pane.openTaskManager`): scan codes, so a line goes through the clipboard
+//! (redirected into the session) and is pasted, which no keyboard layout on
+//! the server can change.
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
@@ -20,6 +26,7 @@ const Allocator = std.mem.Allocator;
 const win32_types = @import("../win32_types.zig");
 const terminals_import = @import("terminals_import.zig");
 const profile_credentials = @import("profile_credentials.zig");
+const clipboard_write = @import("clipboard_write.zig");
 
 const BOOL = win32_types.BOOL;
 const GUID = win32_types.GUID;
@@ -92,6 +99,62 @@ const INonScriptableVtbl = extern struct {
 };
 const INonScriptable = extern struct { vtbl: *const INonScriptableVtbl };
 
+/// IMsRdpClientNonScriptable (mstsax.idl): IMsTscNonScriptable's ten
+/// methods, then NotifyRedirectDeviceChange and SendKeys. Only Release and
+/// SendKeys are called; the slots before SendKeys are pinned by a test.
+const IClientNonScriptableVtbl = extern struct {
+    QueryInterface: *const anyopaque,
+    AddRef: *const anyopaque,
+    Release: *const fn (*IClientNonScriptable) callconv(.winapi) u32,
+    put_ClearTextPassword: *const anyopaque,
+    put_PortablePassword: *const anyopaque,
+    get_PortablePassword: *const anyopaque,
+    put_PortableSalt: *const anyopaque,
+    get_PortableSalt: *const anyopaque,
+    put_BinaryPassword: *const anyopaque,
+    get_BinaryPassword: *const anyopaque,
+    put_BinarySalt: *const anyopaque,
+    get_BinarySalt: *const anyopaque,
+    ResetPassword: *const anyopaque,
+    NotifyRedirectDeviceChange: *const anyopaque,
+    /// `numKeys`, then a VARIANT_BOOL per key (-1: released) and its key
+    /// data (the scan code; 0x100 marks an extended key).
+    SendKeys: *const fn (*IClientNonScriptable, i32, [*]const i16, [*]const i32) callconv(.winapi) HRESULT,
+};
+const IClientNonScriptable = extern struct { vtbl: *const IClientNonScriptableVtbl };
+
+/// One key of a `SendKeys` batch.
+const Key = struct {
+    code: i32,
+    up: bool,
+};
+
+fn press(code: i32) [2]Key {
+    return .{ .{ .code = code, .up = false }, .{ .code = code, .up = true } };
+}
+
+// Set 1 scan codes; 0x100 marks an extended key (the left Windows key is
+// E0 5B). Unmeasured against a server: the extended flag's encoding is the
+// one the control's key data is documented to follow for WM_KEYDOWN's lParam.
+const sc_win: i32 = 0x15B;
+const sc_ctrl: i32 = 0x1D;
+const sc_shift: i32 = 0x2A;
+const sc_esc: i32 = 0x01;
+const sc_r: i32 = 0x13;
+const sc_v: i32 = 0x2F;
+const sc_enter: i32 = 0x1C;
+
+/// Win+R: the Run box.
+const keys_run_box = [_]Key{ .{ .code = sc_win, .up = false }, .{ .code = sc_r, .up = false }, .{ .code = sc_r, .up = true }, .{ .code = sc_win, .up = true } };
+/// Ctrl+V: what the clipboard holds, pasted.
+const keys_paste = [_]Key{ .{ .code = sc_ctrl, .up = false }, .{ .code = sc_v, .up = false }, .{ .code = sc_v, .up = true }, .{ .code = sc_ctrl, .up = true } };
+const keys_enter = press(sc_enter);
+/// Ctrl+Shift+Esc: Task Manager, which opens without Explorer.
+const keys_task_manager = [_]Key{
+    .{ .code = sc_ctrl, .up = false }, .{ .code = sc_shift, .up = false }, .{ .code = sc_esc, .up = false },
+    .{ .code = sc_esc, .up = true },   .{ .code = sc_shift, .up = true },  .{ .code = sc_ctrl, .up = true },
+};
+
 /// oaidl.h's VARIANT: 16 bytes on 32-bit targets, 24 on 64-bit ones.
 const VARIANT = extern struct {
     vt: u16 = 0,
@@ -123,6 +186,7 @@ const LOCALE_USER_DEFAULT: u32 = 0x0400;
 const IID_NULL: GUID = std.mem.zeroes(GUID);
 const IID_IDispatch: GUID = .{ .Data1 = 0x00020400, .Data2 = 0, .Data3 = 0, .Data4 = .{ 0xC0, 0, 0, 0, 0, 0, 0, 0x46 } };
 const IID_IMsTscNonScriptable: GUID = .{ .Data1 = 0xC1E6743A, .Data2 = 0x41C1, .Data3 = 0x4A74, .Data4 = .{ 0x83, 0x2A, 0x0D, 0xD0, 0x6C, 0x1C, 0x7A, 0x0E } };
+const IID_IMsRdpClientNonScriptable: GUID = .{ .Data1 = 0x2F079C4C, .Data2 = 0x87B2, .Data3 = 0x4AFD, .Data4 = .{ 0x97, 0xAB, 0x20, 0xCD, 0xB4, 0x30, 0x38, 0xAE } };
 
 /// The newest Remote Desktop clients first (`MsTscAx.MsTscAx.<n>`, the
 /// not-safe-for-scripting classes, which take a password); the
@@ -309,6 +373,37 @@ pub const Events = struct {
     released: *const fn (ctx: *anyopaque) void,
     /// The session connected: the pane may say how to leave it.
     connected: *const fn (ctx: *anyopaque) void,
+    /// A line typed into the remote Run box (`Pane.typeRunLine`) is done.
+    sent: *const fn (ctx: *anyopaque, outcome: Sent) void,
+};
+
+/// What `Pane.typeRunLine` came to. Keys reaching the session are all that
+/// can be known: koreterm does not see the remote screen.
+pub const Sent = enum {
+    /// Win+R, the paste and Enter all went into the session.
+    run_line,
+    /// The control refused a batch, or the session went meanwhile.
+    failed,
+};
+
+pub const SendError = error{
+    /// The session is not connected (connecting, or gone).
+    NotConnected,
+    /// A line is still being typed.
+    Busy,
+    /// The clipboard would not take the line.
+    ClipboardUnavailable,
+    /// The control refused the keys.
+    KeysRefused,
+    OutOfMemory,
+};
+
+/// What PowerShell remoting signs in with: the pane's server and login,
+/// borrowed from the pane (copy them before anything can end the session).
+pub const Remoting = struct {
+    server: []const u8,
+    user: []const u8,
+    password: ?[]const u8,
 };
 
 /// What the pane signs in with.
@@ -361,6 +456,11 @@ pub const Pane = struct {
     options: Options,
     /// Owned copies of the login, the password zeroed when freed.
     profile_id: ?[]u8 = null,
+    /// The server, without its port: PowerShell remoting's computer name.
+    server: []u8 = &.{},
+    /// Where a line typed into the Run box is (`typeRunLine`): 0 none,
+    /// 1 the Run box asked for, 2 the line pasted.
+    send_step: u8 = 0,
     user: []u8 = &.{},
     password: ?[]u8 = null,
     started: bool = false,
@@ -382,6 +482,11 @@ pub const Pane = struct {
     const prop_name = L("koreterm.rdp_pane");
     const poll_timer: usize = 0x5244; // "RD"
     const start_timer: usize = 0x5253; // "RS"
+    const send_timer: usize = 0x5258; // "RX"
+    /// The Run box's time to open before the paste, and the paste's to land
+    /// (the clipboard reaches the server through its own channel).
+    const run_box_wait_ms: u32 = 900;
+    const paste_wait_ms: u32 = 500;
     const GWL_STYLE: i32 = -16;
 
     /// Cover `parent`'s client area (`width` x `height`) with the Remote
@@ -455,6 +560,7 @@ pub const Pane = struct {
             .desk_h = desk_h,
         };
         self.profile_id = if (login.profile_id) |id| alloc.dupe(u8, id) catch null else null;
+        self.server = alloc.dupe(u8, target.server) catch &.{};
         self.user = alloc.dupe(u8, login.user) catch &.{};
         self.password = if (login.password) |text| alloc.dupe(u8, text) catch null else null;
 
@@ -563,10 +669,92 @@ pub const Pane = struct {
         _ = SetFocus(self.hwnd);
     }
 
+    /// The session is connected (not connecting, not dropped).
+    pub fn isConnected(self: *Pane) bool {
+        return connectedState(self.control) == 1;
+    }
+
+    /// The server and login, for PowerShell remoting. Borrowed.
+    pub fn remoting(self: *const Pane) Remoting {
+        return .{ .server = self.server, .user = self.user, .password = self.password };
+    }
+
+    /// Type `line` into the remote desktop's Run box: the line goes on the
+    /// clipboard (which the session shares), then Win+R, and from the
+    /// message loop Ctrl+V and Enter (`sendTick`). `Events.sent` says how it
+    /// went. The line stays on this PC's clipboard.
+    pub fn typeRunLine(self: *Pane, line: []const u8) SendError!void {
+        if (!self.isConnected()) return error.NotConnected;
+        if (self.send_step != 0) return error.Busy;
+        const wide = std.unicode.utf8ToUtf16LeAlloc(self.alloc, line) catch return error.OutOfMemory;
+        defer self.alloc.free(wide);
+        clipboard_write.write(.{}, self.hwnd, &.{clipboard_write.unicodeText(wide)}) catch return error.ClipboardUnavailable;
+        self.focus();
+        if (!self.sendKeys(&keys_run_box)) return error.KeysRefused;
+        self.send_step = 1;
+        _ = SetTimer(self.hwnd, send_timer, run_box_wait_ms, &sendTick);
+    }
+
+    /// Ctrl+Shift+Esc into the session: Task Manager, which opens even when
+    /// Explorer (and with it the Run box) is gone.
+    pub fn openTaskManager(self: *Pane) SendError!void {
+        if (!self.isConnected()) return error.NotConnected;
+        if (self.send_step != 0) return error.Busy;
+        self.focus();
+        if (!self.sendKeys(&keys_task_manager)) return error.KeysRefused;
+    }
+
+    /// One batch of keys into the session, as `SendKeys` takes them.
+    fn sendKeys(self: *Pane, keys: []const Key) bool {
+        var up: [8]i16 = undefined;
+        var data: [8]i32 = undefined;
+        if (keys.len > up.len) return false;
+        var raw: ?*anyopaque = null;
+        if (!succeeded(self.unknown.vtbl.QueryInterface(self.unknown, &IID_IMsRdpClientNonScriptable, &raw)) or raw == null) return false;
+        const ns: *IClientNonScriptable = @ptrCast(@alignCast(raw.?));
+        defer _ = ns.vtbl.Release(ns);
+        for (keys, 0..) |key, i| {
+            up[i] = if (key.up) -1 else 0;
+            data[i] = key.code;
+        }
+        const hr = ns.vtbl.SendKeys(ns, @intCast(keys.len), &up, &data);
+        if (!succeeded(hr)) log.warn("rdp pane: SendKeys refused hr=0x{x}", .{@as(u32, @bitCast(hr))});
+        return succeeded(hr);
+    }
+
+    fn sendTick(hwnd: ?HWND, _: UINT, _: usize, _: u32) callconv(.winapi) void {
+        const window = hwnd orelse return;
+        const raw = GetPropW(window, prop_name) orelse {
+            _ = KillTimer(window, send_timer);
+            return;
+        };
+        const self: *Pane = @ptrCast(@alignCast(raw));
+        switch (self.send_step) {
+            1 => {
+                if (!self.isConnected() or !self.sendKeys(&keys_paste)) return self.sendDone(.failed);
+                self.send_step = 2;
+                // Its next tick, after the paste has landed.
+                _ = SetTimer(window, send_timer, paste_wait_ms, &sendTick);
+            },
+            2 => {
+                if (!self.isConnected() or !self.sendKeys(&keys_enter)) return self.sendDone(.failed);
+                self.sendDone(.run_line);
+            },
+            else => _ = KillTimer(window, send_timer),
+        }
+    }
+
+    fn sendDone(self: *Pane, outcome: Sent) void {
+        _ = KillTimer(self.hwnd, send_timer);
+        self.send_step = 0;
+        self.events.sent(self.events.ctx, outcome);
+    }
+
     /// End the session and the control (the pane goes, or the session ended).
     pub fn destroy(self: *Pane) void {
         _ = KillTimer(self.hwnd, poll_timer);
         _ = KillTimer(self.hwnd, start_timer);
+        _ = KillTimer(self.hwnd, send_timer);
         _ = RemovePropW(self.hwnd, prop_name);
         if (connectedState(self.control) != 0) _ = call(self.control, L("Disconnect"));
         _ = self.control.vtbl.Release(self.control);
@@ -577,6 +765,7 @@ pub const Pane = struct {
             self.alloc.free(text);
         }
         self.alloc.free(self.user);
+        self.alloc.free(self.server);
         if (self.profile_id) |id| self.alloc.free(id);
         self.alloc.destroy(self);
     }
@@ -800,4 +989,23 @@ test "rdp pane: COM structs match the SDK" {
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(VARIANT));
     try std.testing.expectEqual(@as(usize, 8), @offsetOf(VARIANT, "data"));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(DISPPARAMS));
+}
+
+test "rdp pane: SendKeys is the fifteenth slot of IMsRdpClientNonScriptable" {
+    try std.testing.expectEqual(@as(usize, 2 * @sizeOf(usize)), @offsetOf(IClientNonScriptableVtbl, "Release"));
+    try std.testing.expectEqual(@as(usize, 3 * @sizeOf(usize)), @offsetOf(IClientNonScriptableVtbl, "put_ClearTextPassword"));
+    try std.testing.expectEqual(@as(usize, 14 * @sizeOf(usize)), @offsetOf(IClientNonScriptableVtbl, "SendKeys"));
+}
+
+test "rdp pane: each key batch releases every key it presses, in reverse" {
+    for ([_][]const Key{ &keys_run_box, &keys_paste, &keys_enter, &keys_task_manager }) |batch| {
+        try std.testing.expect(batch.len % 2 == 0 and batch.len <= 8);
+        const half = batch.len / 2;
+        for (batch[0..half], 0..) |key, i| {
+            try std.testing.expect(!key.up);
+            const release = batch[batch.len - 1 - i];
+            try std.testing.expect(release.up);
+            try std.testing.expectEqual(key.code, release.code);
+        }
+    }
 }

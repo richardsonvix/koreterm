@@ -8001,6 +8001,12 @@ pub const Host = struct {
         // edited as a connection instead.
         const is_rdp = if (self.tabs.items[tab_index].focusedSurface()) |surface| surface.rdp_config != null else true;
         if (!is_rdp) _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_TAB_NEW_PROFILE, std.unicode.utf8ToUtf16LeStringLiteral("Create Profile from This Tab..."));
+        // A command typed or run in the remote desktop: only while its
+        // session is up.
+        if (is_rdp) {
+            const live_session = if (self.tabs.items[tab_index].focusedSurface()) |surface| surface.rdp_pane != null else false;
+            _ = sys.AppendMenuW(menu, if (live_session) c.MF_STRING else c.MF_GRAYED, c.CTX_TAB_RDP_COMMAND, std.unicode.utf8ToUtf16LeStringLiteral("Run Command on Remote Desktop..."));
+        }
         _ = sys.AppendMenuW(menu, c.MF_SEPARATOR, 0, null);
         _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_TAB_MOVE_LEFT, std.unicode.utf8ToUtf16LeStringLiteral("Move Tab Left"));
         _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_TAB_MOVE_RIGHT, std.unicode.utf8ToUtf16LeStringLiteral("Move Tab Right"));
@@ -8032,6 +8038,11 @@ pub const Host = struct {
                 },
                 c.CTX_TAB_NEW_PROFILE => {
                     newProfileFromSurface(live.app, surface);
+                    return true;
+                },
+                c.CTX_TAB_RDP_COMMAND => {
+                    // A modal window: the Host may be gone after it.
+                    surface.openRdpCommandDialog();
                     return true;
                 },
                 c.CTX_TAB_CLOSE => {

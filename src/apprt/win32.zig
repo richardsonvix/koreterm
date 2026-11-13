@@ -430,6 +430,7 @@ test {
     _ = @import("win32/terminals_import_dialog.zig");
     _ = @import("win32/profile_credentials.zig");
     _ = @import("win32/rdp_pane.zig");
+    _ = @import("win32/rdp_command_dialog.zig");
     _ = @import("win32/rdp_connection_dialog.zig");
     _ = @import("win32/profile_dialog.zig");
     _ = @import("win32/settings_backup.zig");

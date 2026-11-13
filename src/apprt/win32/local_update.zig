@@ -6,6 +6,10 @@
 //! starts koreterm again. Ignore remembers the version in `update.ignored`, so
 //! the same package does not ask again.
 //!
+//! An applied package does not stay: the script deletes it, trying again
+//! while something still holds it, and a start that finds one no newer than
+//! itself (applied already, or older) deletes it with its `update.ignored`.
+//!
 //! The package holds the portable program files, `version.txt` (the new
 //! version, `major.minor.patch`) and `whats-new.txt` (what to show), the two
 //! text files stored uncompressed (`scripts/make-update-zip.ps1` makes it so).
@@ -53,7 +57,8 @@ pub const Version = struct {
 };
 
 /// An `update.zip` beside the executable whose version is newer than
-/// `current` and not ignored, read in `a` (an arena). Null otherwise.
+/// `current` and not ignored, read in `a` (an arena). Null otherwise. One
+/// no newer than `current` is spent: it is deleted (`isSpent`).
 pub fn find(a: Allocator, current: []const u8) ?Pending {
     const dir = std.fs.selfExeDirPathAlloc(a) catch return null;
     const zip_path = std.fs.path.join(a, &.{ dir, zip_name }) catch return null;
@@ -62,13 +67,25 @@ pub fn find(a: Allocator, current: []const u8) ?Pending {
     const version = std.mem.trim(u8, version_text, " \t\r\n\xEF\xBB\xBF");
     const new = Version.parse(version) orelse return null;
     const now = Version.parse(current) orelse return null;
-    if (!new.newerThan(now)) return null;
+    if (isSpent(new, now)) {
+        std.fs.cwd().deleteFile(zip_path) catch |err| std.log.warn("local update: an applied update.zip could not be deleted err={}", .{err});
+        if (std.fs.path.join(a, &.{ dir, ignored_name })) |path| {
+            std.fs.cwd().deleteFile(path) catch {};
+        } else |_| {}
+        return null;
+    }
     const ignored_path = std.fs.path.join(a, &.{ dir, ignored_name }) catch return null;
     if (std.fs.cwd().readFileAlloc(a, ignored_path, 256)) |ignored| {
         if (std.mem.eql(u8, std.mem.trim(u8, ignored, " \t\r\n"), version)) return null;
     } else |_| {}
     const notes = storedEntry(bytes, "whats-new.txt") orelse "";
     return .{ .dir = dir, .zip_path = zip_path, .version = version, .notes = std.mem.trim(u8, notes, " \t\r\n\xEF\xBB\xBF") };
+}
+
+/// Whether a package of version `package` is of no use to a koreterm of
+/// version `running`: the same version (it was applied) or an older one.
+pub fn isSpent(package: Version, running: Version) bool {
+    return !package.newerThan(running);
 }
 
 /// The bytes of `name` (any case, at the archive's root or one folder deep)
@@ -149,7 +166,11 @@ const update_script =
     \\    if ($inner) { $src = $inner.FullName }
     \\  }
     \\  & robocopy.exe $src $Target /E /XF version.txt whats-new.txt /R:20 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
-    \\  Remove-Item -LiteralPath $Zip -Force -ErrorAction SilentlyContinue
+    \\  # Applied: the package goes, tried again while something still holds it.
+    \\  for ($i = 0; $i -lt 20 -and (Test-Path -LiteralPath $Zip); $i++) {
+    \\    Remove-Item -LiteralPath $Zip -Force -ErrorAction SilentlyContinue
+    \\    if (Test-Path -LiteralPath $Zip) { Start-Sleep -Milliseconds 500 }
+    \\  }
     \\  Remove-Item -LiteralPath (Join-Path $Target 'update.ignored') -Force -ErrorAction SilentlyContinue
     \\} finally {
     \\  Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
@@ -223,6 +244,13 @@ test "local update: versions compare by number" {
     try std.testing.expect(Version.parse("1.10.0").?.newerThan(Version.parse("1.9.99").?));
     try std.testing.expect(Version.parse("1.3.138-dev").?.patch == 138);
     try std.testing.expect(Version.parse("1.3") == null);
+}
+
+test "local update: a package no newer than the running koreterm is spent" {
+    const running = Version.parse("1.3.142").?;
+    try std.testing.expect(isSpent(Version.parse("1.3.142").?, running));
+    try std.testing.expect(isSpent(Version.parse("1.3.141").?, running));
+    try std.testing.expect(!isSpent(Version.parse("1.3.143").?, running));
 }
 
 test "local update: a stored entry is read from the archive" {
