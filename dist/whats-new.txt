@@ -1,3 +1,15 @@
+koreterm 1.3.148
+
+- Renaming a profile (Settings, or Edit Profile in a tab's menu) renames
+  the tabs opened from it that still show the old name. A tab you renamed
+  yourself keeps its name.
+- Remote Desktop sessions keep their size while their tab is hidden or
+  the window is minimized, instead of shrinking to 200 x 200; a session
+  could drop when a profile was saved.
+- rdp-events.log in %LOCALAPPDATA%\koreterm records when a Remote
+  Desktop session connects, changes size, drops or ends, and why (never
+  the server, user or password).
+
 koreterm 1.3.147
 
 - Edit Profile in a tab's right-click menu: a tab opened from a profile
