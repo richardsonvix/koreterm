@@ -14,5 +14,5 @@ metadata:
 - The user's updates are the update.zip flow:
   1. `pwsh scripts\package-windows.ps1 -Version X`
   2. `pwsh scripts\make-update-zip.ps1 -Version X -NotesFile dist\whats-new.txt`
-- The result is `D:\Projetos\koreterm\dist\artifacts\koreterm-X-windows-x64\update.zip`. Bump the version above the last delivered one (1.3.145 update.zip was generated on 2026-11-16, so the next one is 1.3.146).
+- The result is `D:\Projetos\koreterm\dist\artifacts\koreterm-X-windows-x64\update.zip`. Bump the version above the last delivered one (1.3.146 update.zip was generated on 2026-11-16, so the next one is 1.3.147).
 - The user's repo is richardsonvix/koreterm. `main` is pushed with fast-forwards from the feature branch. See [[only-own-repo]].

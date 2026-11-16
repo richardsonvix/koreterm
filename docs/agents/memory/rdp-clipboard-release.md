@@ -11,7 +11,7 @@ metadata:
 - `release` runs when a non-RDP pane takes the focus or the app is deactivated. It copies text, DIB, HTML and RTF on a worker thread into a local copy with no owner. Files stay with the session.
 - A terminal paste that still finds the session as owner reads on a worker (`readText`, then `WM_WINHOSTTY_CLIPBOARD_TEXT`).
 
-Built, and the `clipboard` test filter passes. Not yet in an update.zip, and not tested on a real RDP session.
+Built, and the `clipboard` test filter passes. In the 1.3.146 update.zip (commit b7b138d29). Not tested on a real RDP session.
 
 **Why:** the hosted RDP control renders delayed clipboard data on koreterm's UI thread.
 
