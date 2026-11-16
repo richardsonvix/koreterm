@@ -221,6 +221,9 @@ pub const WM_WINHOSTTY_CONFIRM_DIALOG = WM_APP + 18;
 /// A worker read a Remote Desktop session's clipboard for a pane's paste
 /// (`rdp_clipboard.readText`): wParam the request, lParam its `*TextRead`.
 pub const WM_WINHOSTTY_CLIPBOARD_TEXT = WM_APP + 19;
+/// Posted to the UI thread (no window): a newer release's `update.zip` was
+/// downloaded beside the executable (`site_update.zig`).
+pub const WM_WINHOSTTY_SITE_UPDATE = WM_APP + 20;
 
 pub const PM_NOREMOVE: UINT = 0x0000;
 pub const PM_REMOVE: UINT = 0x0001;

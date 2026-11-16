@@ -76,6 +76,7 @@ const config_edit = @import("../../config/edit.zig");
 const rdp_pane = @import("rdp_pane.zig");
 const rdp_group = @import("rdp_group.zig");
 const local_update = @import("local_update.zig");
+const site_update = @import("site_update.zig");
 const config_file_load = @import("../../config/file_load.zig");
 const configpkg = @import("../../config.zig");
 const confirm_text = @import("confirm_text.zig");
@@ -950,6 +951,9 @@ pub const App = struct {
     /// Update at the start dialog started the swap (`runLocalUpdateCheck`):
     /// the exit does not start another (`applyLocalUpdateAtExit`).
     local_update_started: bool = false,
+    /// The launch's one look at GitHub for a newer release
+    /// (`site_update.start`) has begun.
+    site_update_started: bool = false,
     /// `prefetchProfiles` ran.
     profiles_prefetched: bool = false,
     /// Detected on first use: the install directory cannot change under a
@@ -1802,6 +1806,12 @@ pub const App = struct {
                     if ((pending or self.anyHostRequestedProfiles()) and self.registry.hosts.items.len > 0) self.startProfileDiscovery();
                     continue;
                 }
+            }
+
+            // A newer release's package is beside the executable now.
+            if (msg.message == c.WM_WINHOSTTY_SITE_UPDATE and @intFromPtr(msg.hwnd) == 0) {
+                if (self.running and !self.quitting) self.runLocalUpdateCheck();
+                continue;
             }
 
             switch (self.routeLoopMessage(&msg)) {
@@ -3262,7 +3272,15 @@ pub const App = struct {
         var arena: std.heap.ArenaAllocator = .init(self.core_app.alloc);
         defer arena.deinit();
         const a = arena.allocator();
-        const pending = local_update.find(a, build_config.version_string) orelse return;
+        const pending = local_update.find(a, build_config.version_string) orelse {
+            // Nothing waiting here: look for a newer release on GitHub,
+            // which comes back here once its package is downloaded.
+            if (!self.site_update_started and self.config.@"auto-update" != .off) {
+                self.site_update_started = true;
+                site_update.start(self.ui_thread_id, c.WM_WINHOSTTY_SITE_UPDATE, build_config.version_string);
+            }
+            return;
+        };
         const owner: ?HWND = for (self.registry.hosts.items) |host| {
             if (host.hwnd) |hwnd| break hwnd;
         } else null;

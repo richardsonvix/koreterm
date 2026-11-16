@@ -539,7 +539,8 @@ that govern each symbol you change, or that none does.
   `Contracts.93-ConPty.ps1`), signing,
   the updater (including `RegisterApplicationRestart` while an installer
   closes koreterm, with `stagedInstallerRunning`; `pkg/wuffs/src/deflate.zig`,
-  the raw DEFLATE decoder for update payloads; the files a portable payload
+  the raw DEFLATE decoder for update payloads; the fork's own update.zip
+  channel: `scripts/publish-update.ps1` and `src/apprt/win32/site_update.zig`; the files a portable payload
   must hold and the ones it may drop: `managed_entries`, `retired_entries`,
   `legacy_updater_required_entries`, `portable_zip_carries_legacy_entries`,
   `requirePayloadEntries`, `swapPayload`, `rollback`, `fileMatches`,

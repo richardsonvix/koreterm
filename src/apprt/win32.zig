@@ -438,6 +438,7 @@ test {
     _ = @import("win32/profile_dialog.zig");
     _ = @import("win32/settings_backup.zig");
     _ = @import("win32/local_update.zig");
+    _ = @import("win32/site_update.zig");
     _ = @import("win32/desktop_shortcuts.zig");
     _ = @import("win32/tab_style.zig");
     _ = @import("win32/env_refresh.zig");

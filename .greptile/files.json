@@ -360,7 +360,9 @@
         "dist/**",
         "test/windows/test_dll_init.c",
         "test/windows/flagship/contracts/Contracts.93-ConPty.ps1",
-        ".github/**"
+        ".github/**",
+        "src/apprt/win32/site_update.zig",
+        "scripts/publish-update.ps1"
       ]
     },
     {

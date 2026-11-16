@@ -2196,6 +2196,22 @@ fn fetchHttps(
     }
 }
 
+/// An HTTPS body of at most `max_bytes`, redirects followed as the release
+/// check follows them, in `alloc`. For the Win32 runtime's check of the
+/// fork's own releases (`apprt/win32/site_update.zig`).
+pub fn fetchText(alloc: Allocator, url: []const u8, accept: []const u8, max_bytes: u64) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    try fetchHttps(alloc, "site update", url, &.{.{ .name = "accept", .value = accept }}, &out.writer, max_bytes);
+    return out.toOwnedSlice();
+}
+
+/// `url` saved at the absolute `dest_path` (through a `.part` beside it, as
+/// the release check stages its downloads).
+pub fn downloadFile(alloc: Allocator, url: []const u8, dest_path: []const u8) !void {
+    return downloadUrlToFile(alloc, url, dest_path);
+}
+
 fn downloadUrlToFile(alloc: Allocator, url: []const u8, dest_path: []const u8) !void {
     if (!std.fs.path.isAbsolute(dest_path)) return error.InvalidDownloadPath;
     const dir_path = std.fs.path.dirname(dest_path) orelse return error.InvalidDownloadPath;
