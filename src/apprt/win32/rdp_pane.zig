@@ -27,6 +27,7 @@ const win32_types = @import("../win32_types.zig");
 const terminals_import = @import("terminals_import.zig");
 const profile_credentials = @import("profile_credentials.zig");
 const clipboard_write = @import("clipboard_write.zig");
+const xdg = @import("../../os/xdg.zig");
 
 const BOOL = win32_types.BOOL;
 const GUID = win32_types.GUID;
@@ -450,6 +451,32 @@ pub const Options = struct {
     }
 };
 
+/// Appends one line to `rdp-events.log` in koreterm's state folder
+/// (`%LOCALAPPDATA%\koreterm`, or the portable folder's): when a session
+/// connected, dropped, ended, took new options or a new display size, and
+/// why, so a session that ends unasked can be traced afterwards. Never a
+/// server, user or password. The file starts again past 256 KiB. Best
+/// effort: a failure is ignored.
+fn noteEvent(comptime fmt: []const u8, args: anytype) void {
+    if (builtin.is_test) return;
+    const alloc = std.heap.page_allocator;
+    const dir_path = xdg.state(alloc, .{ .subdir = "koreterm" }) catch return;
+    defer alloc.free(dir_path);
+    std.fs.cwd().makePath(dir_path) catch {};
+    var dir = std.fs.cwd().openDir(dir_path, .{}) catch return;
+    defer dir.close();
+    const file = dir.createFile("rdp-events.log", .{ .truncate = false }) catch return;
+    defer file.close();
+    const end = file.getEndPos() catch return;
+    if (end > 256 * 1024) file.setEndPos(0) catch return;
+    file.seekFromEnd(0) catch return;
+    var line: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&line);
+    writer.print("{d} ", .{std.time.timestamp()}) catch return;
+    writer.print(fmt ++ "\n", args) catch return;
+    file.writeAll(writer.buffered()) catch {};
+}
+
 /// Reconnects a dropped session gets before the tab says it ended. Each one
 /// signs in again, so a password gone stale costs one failed logon per
 /// attempt: kept well under an account lockout threshold.
@@ -722,6 +749,10 @@ pub const Pane = struct {
     /// cell of a group's grid). As `resize`, the session follows once the
     /// size settles.
     pub fn placeIn(self: *Pane, x: i32, y: i32, width: i32, height: i32) void {
+        // A minimized window or a hidden pane reports no area: the session
+        // keeps its size (asking for one would shrink it to the 200 x 200
+        // floor, a display change the server makes every time).
+        if (width <= 0 or height <= 0) return;
         self.origin_x = x;
         self.origin_y = y;
         self.pane_w = width;
@@ -795,6 +826,7 @@ pub const Pane = struct {
         }
         // Width, height, physical width and height (mm, 0: unknown),
         // orientation, desktop scale (%), device scale (%).
+        noteEvent("pane={x} display {d}x{d} -> {d}x{d}", .{ @intFromPtr(self), self.desk_w, self.desk_h, w, h });
         if (!callI4s(self.control, L("UpdateSessionDisplaySettings"), 7, .{ w, h, 0, 0, 0, 100, 100 })) {
             log.info("rdp pane: the session keeps its size (no UpdateSessionDisplaySettings)", .{});
             return;
@@ -836,6 +868,7 @@ pub const Pane = struct {
             return;
         }
         self.options_reconnect = true;
+        noteEvent("pane={x} disconnect to take new options", .{@intFromPtr(self)});
         _ = call(self.control, L("Disconnect"));
     }
 
@@ -945,6 +978,7 @@ pub const Pane = struct {
 
     /// End the session and the control (the pane goes, or the session ended).
     pub fn destroy(self: *Pane) void {
+        noteEvent("pane={x} destroyed connected_state={d}", .{ @intFromPtr(self), connectedState(self.control) });
         _ = KillTimer(self.hwnd, poll_timer);
         _ = KillTimer(self.hwnd, start_timer);
         _ = KillTimer(self.hwnd, send_timer);
@@ -988,6 +1022,7 @@ pub const Pane = struct {
                 self.reconnects = 0;
                 if (!self.told_connected) {
                     self.told_connected = true;
+                    noteEvent("pane={x} connected", .{@intFromPtr(self)});
                     self.events.connected(self.events.ctx);
                     // A size the pane took while it connected.
                     if (self.pane_w != 0) self.fitSession();
@@ -1024,12 +1059,14 @@ pub const Pane = struct {
                 self.idle_polls = 0;
                 self.reconnects += 1;
                 log.info("rdp pane: reconnecting attempt={d} reason={d}", .{ self.reconnects, reason });
+                noteEvent("pane={x} dropped reason={d}, reconnect attempt={d}", .{ @intFromPtr(self), reason, self.reconnects });
                 self.connect();
                 return;
             },
             .end => {},
         }
         log.info("rdp pane: session ended extended_reason={d} reconnects={d}", .{ reason, self.reconnects });
+        noteEvent("pane={x} ended reason={d} was_connected={} reconnects={d}", .{ @intFromPtr(self), reason, self.told_connected, self.reconnects });
         const events = self.events;
         self.destroy();
         events.ended(events.ctx);

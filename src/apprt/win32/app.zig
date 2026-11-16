@@ -4579,6 +4579,7 @@ pub const App = struct {
                         for (self.registry.hosts.items) |host| {
                             if (host.overlay_mode == .command_palette) host.hideOverlay();
                         }
+                        if (profiles_changed) self.renameProfileTabs(&self.config, &config);
                         self.unregisterGlobalHotkeys();
                         self.config.deinit();
                         self.config = config;
@@ -5710,6 +5711,29 @@ pub const App = struct {
         };
         recordLaunch(alloc, surface, key, opts.launch.ssh, tab_title);
         return surface;
+    }
+
+    /// A user profile renamed between `old` and `new` (Settings, or the
+    /// tab menu's Edit Profile): every pane opened from it whose tab still
+    /// shows the old name (a Remote Desktop tab's, or a title no program
+    /// changed) shows the new one. A tab renamed by hand keeps its name.
+    fn renameProfileTabs(self: *App, old: *const configpkg.Config, new: *const configpkg.Config) void {
+        const user_prefix = "user:";
+        for (self.registry.windows.items) |surface| {
+            // A group's tab is named after the group.
+            if (surface.rdp_group != null) continue;
+            const key = surface.launch_profile_key orelse continue;
+            if (!std.ascii.startsWithIgnoreCase(key, user_prefix)) continue;
+            const id = key[user_prefix.len..];
+            // A profile removed keeps its tabs' names.
+            if (new.@"profile-command".get(id) == null) continue;
+            const old_name = old.@"profile-name".get(id) orelse id;
+            const new_name = new.@"profile-name".get(id) orelse id;
+            if (std.mem.eql(u8, old_name, new_name)) continue;
+            const shown = surface.effectiveTitle() orelse continue;
+            if (!std.mem.eql(u8, shown, old_name)) continue;
+            surface.setTabTitleOverride(new_name) catch |err| log.warn("profile tab rename failed err={}", .{err});
+        }
     }
 
     /// What a surface keeps of its launch: the key that splits, session
