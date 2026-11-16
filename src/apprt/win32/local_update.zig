@@ -153,7 +153,7 @@ pub fn ignore(a: Allocator, pending: Pending) void {
 }
 
 const update_script =
-    \\param([int]$ProcessId, [string]$Zip, [string]$Target, [string]$Exe)
+    \\param([int]$ProcessId, [string]$Zip, [string]$Target, [string]$Exe, [switch]$NoRestart)
     \\$ErrorActionPreference = 'Stop'
     \\try { Wait-Process -Id $ProcessId -Timeout 120 -ErrorAction SilentlyContinue } catch {}
     \\Start-Sleep -Milliseconds 700
@@ -174,9 +174,11 @@ const update_script =
     \\  Remove-Item -LiteralPath (Join-Path $Target 'update.ignored') -Force -ErrorAction SilentlyContinue
     \\} finally {
     \\  Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
-    \\  $current = Join-Path $Target 'koreterm.exe'
-    \\  if (Test-Path -LiteralPath $current) { $Exe = $current }
-    \\  Start-Process -FilePath $Exe -WorkingDirectory $Target
+    \\  if (-not $NoRestart) {
+    \\    $current = Join-Path $Target 'koreterm.exe'
+    \\    if (Test-Path -LiteralPath $current) { $Exe = $current }
+    \\    Start-Process -FilePath $Exe -WorkingDirectory $Target
+    \\  }
     \\}
 ;
 
@@ -210,18 +212,63 @@ extern "kernel32" fn CreateProcessW(app: ?[*:0]const u16, cmd: [*:0]u16, pa: ?*a
 extern "kernel32" fn CloseHandle(h: ?*anyopaque) callconv(.winapi) BOOL;
 extern "kernel32" fn GetCurrentProcessId() callconv(.winapi) u32;
 
+/// Whether the script starts koreterm again once the files are in place.
+pub const Restart = enum { restart, no_restart };
+
+/// koreterm is closing with a newer `update.zip` beside it: Windows' dialog
+/// says it is installed now and that koreterm does not open again by itself.
+pub fn tellAtExit(a: Allocator, pending: Pending, current: []const u8) void {
+    const notes = if (pending.notes.len == 0) "(no notes)" else pending.notes;
+    const shown = notes[0..@min(notes.len, 3000)];
+    const text = std.fmt.allocPrint(a, "koreterm is closing: the update to {s} in update.zip is installed now (this is {s}).\n\nWhat's new:\n{s}\n\nkoreterm does not open again by itself: start it when you want.", .{ pending.version, current, shown }) catch return;
+    const text_w = std.unicode.utf8ToUtf16LeAllocZ(a, text) catch return;
+    const MB_OK: u32 = 0x0;
+    const MB_ICONINFORMATION: u32 = 0x40;
+    const MB_SETFOREGROUND: u32 = 0x10000;
+    const MB_TOPMOST: u32 = 0x40000;
+    _ = MessageBoxW(null, text_w.ptr, std.unicode.utf8ToUtf16LeStringLiteral("koreterm update"), MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND | MB_TOPMOST);
+}
+
+extern "kernel32" fn K32EnumProcesses(ids: [*]u32, bytes: u32, needed: *u32) callconv(.winapi) BOOL;
+extern "kernel32" fn OpenProcess(access: u32, inherit: BOOL, id: u32) callconv(.winapi) ?*anyopaque;
+extern "kernel32" fn QueryFullProcessImageNameW(process: *anyopaque, flags: u32, name: [*]u16, size: *u32) callconv(.winapi) BOOL;
+
+/// Another process runs this same `koreterm.exe` (an administrator
+/// instance, say): its files are in use, so a swap now would be partial.
+pub fn otherInstanceRunning(a: Allocator) bool {
+    const exe = std.fs.selfExePathAlloc(a) catch return false;
+    var ids: [4096]u32 = undefined;
+    var needed: u32 = 0;
+    if (K32EnumProcesses(&ids, @sizeOf(@TypeOf(ids)), &needed) == 0) return false;
+    const own = GetCurrentProcessId();
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    for (ids[0 .. needed / @sizeOf(u32)]) |id| {
+        if (id == own or id == 0) continue;
+        const process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, id) orelse continue;
+        defer _ = CloseHandle(process);
+        var name: [1024]u16 = undefined;
+        var size: u32 = name.len;
+        if (QueryFullProcessImageNameW(process, 0, &name, &size) == 0) continue;
+        var buf: [4096]u8 = undefined;
+        const len = std.unicode.wtf16LeToWtf8(&buf, name[0..size]);
+        if (std.ascii.eqlIgnoreCase(buf[0..len], exe)) return true;
+    }
+    return false;
+}
+
 /// Update: write the script to the temp folder and start it, hidden and
-/// detached. The caller quits koreterm right after; the script waits for
-/// this process to end.
-pub fn apply(a: Allocator, pending: Pending) !void {
+/// detached. The caller quits koreterm right after (or is quitting); the
+/// script waits for this process to end, and starts koreterm again unless
+/// `restart` is `.no_restart`.
+pub fn apply(a: Allocator, pending: Pending, restart: Restart) !void {
     const tmp_dir = std.process.getEnvVarOwned(a, "TEMP") catch try a.dupe(u8, pending.dir);
     const script_path = try std.fmt.allocPrint(a, "{s}\\koreterm-update-{d}.ps1", .{ tmp_dir, GetCurrentProcessId() });
     try std.fs.cwd().writeFile(.{ .sub_path = script_path, .data = update_script });
     const exe = try std.fs.selfExePathAlloc(a);
     const command = try std.fmt.allocPrint(
         a,
-        "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{s}\" -ProcessId {d} -Zip \"{s}\" -Target \"{s}\" -Exe \"{s}\"",
-        .{ script_path, GetCurrentProcessId(), pending.zip_path, pending.dir, exe },
+        "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{s}\" -ProcessId {d} -Zip \"{s}\" -Target \"{s}\" -Exe \"{s}\"{s}",
+        .{ script_path, GetCurrentProcessId(), pending.zip_path, pending.dir, exe, if (restart == .no_restart) " -NoRestart" else "" },
     );
     const command_w = try std.unicode.wtf8ToWtf16LeAllocZ(a, command);
     var si: STARTUPINFOW = .{ .cb = @sizeOf(STARTUPINFOW), .dwFlags = 0x1, .wShowWindow = 0 }; // STARTF_USESHOWWINDOW, SW_HIDE

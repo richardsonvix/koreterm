@@ -947,6 +947,9 @@ pub const App = struct {
     /// after the first window shows (`local_update`).
     local_update_timer_id: ?UINT_PTR = null,
     local_update_checked: bool = false,
+    /// Update at the start dialog started the swap (`runLocalUpdateCheck`):
+    /// the exit does not start another (`applyLocalUpdateAtExit`).
+    local_update_started: bool = false,
     /// `prefetchProfiles` ran.
     profiles_prefetched: bool = false,
     /// Detected on first use: the install directory cannot change under a
@@ -1810,6 +1813,28 @@ pub const App = struct {
                 .dispatched => if (try self.finishLoopStep()) break,
             }
         }
+        self.applyLocalUpdateAtExit();
+    }
+
+    /// koreterm is closing with a newer `update.zip` beside it (dropped there
+    /// while it ran, say): it says so and installs it, without opening
+    /// koreterm again. Not at a Windows sign-out or shutdown, nor while
+    /// another process runs this same koreterm.exe (an administrator
+    /// instance), whose files are in use; the next start offers it then.
+    fn applyLocalUpdateAtExit(self: *App) void {
+        if (self.local_update_started or self.session_ending or self.embedding_mode) return;
+        var arena: std.heap.ArenaAllocator = .init(self.core_app.alloc);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const pending = local_update.find(a, build_config.version_string) orelse return;
+        if (local_update.otherInstanceRunning(a)) {
+            log.info("local update left for later: another koreterm runs from this folder", .{});
+            return;
+        }
+        local_update.tellAtExit(a, pending, build_config.version_string);
+        local_update.apply(a, pending, .no_restart) catch |err| {
+            log.warn("local update at exit could not start err={}", .{err});
+        };
     }
 
     pub const LoopRoute = enum {
@@ -3244,10 +3269,11 @@ pub const App = struct {
         switch (local_update.ask(a, owner, pending, build_config.version_string)) {
             .ignore => local_update.ignore(a, pending),
             .update => {
-                local_update.apply(a, pending) catch |err| {
+                local_update.apply(a, pending, .restart) catch |err| {
                     log.warn("local update could not start err={}", .{err});
                     return;
                 };
+                self.local_update_started = true;
                 self.quitConfirmed();
             },
         }
