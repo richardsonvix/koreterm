@@ -269,7 +269,6 @@ const overlay_edit_child_inset_y_base = chrome_layout.overlay_edit_child_inset_y
 const empty_confirm_text_placement = chrome_layout.empty_confirm_text_placement;
 
 const host_tab_height: i32 = (win32_theme.ThemeMetrics{}).height_tab;
-
 const host_tab_small_button_width: i32 = (win32_theme.ThemeMetrics{}).tab_small_button_width;
 
 const host_tab_overflow_button_width: i32 = (win32_theme.ThemeMetrics{}).tab_overflow_button_width;
@@ -8357,7 +8356,10 @@ pub const Host = struct {
         _ = sys.AppendMenuW(rdp_menu, c.MF_STRING, c.CTX_EDIT_CONNECTIONS, std.unicode.utf8ToUtf16LeStringLiteral("Edit connections..."));
         _ = sys.AppendMenuW(rdp_menu, c.MF_STRING, c.CTX_IMPORT_TERMINALS, std.unicode.utf8ToUtf16LeStringLiteral("Import from Terminals..."));
         _ = sys.AppendMenuW(menu, c.MF_POPUP, @intFromPtr(rdp_menu), std.unicode.utf8ToUtf16LeStringLiteral("Remote Desktop"));
-        if (admin_count > 0)
+        // An elevated instance leaves it out: every tab it opens is
+        // elevated already, and the item would only ask UAC again.
+        const already_elevated = win32_elevation.isProcessElevated() catch false;
+        if (admin_count > 0 and !already_elevated)
             _ = sys.AppendMenuW(menu, c.MF_POPUP, @intFromPtr(admin_menu), std.unicode.utf8ToUtf16LeStringLiteral("Run as administrator"))
         else
             _ = sys.DestroyMenu(admin_menu);
@@ -10515,9 +10517,16 @@ pub const Host = struct {
         // A pass that fails after making a button has still changed the list,
         // and the next pass has no new button to say so.
         errdefer if (button_created) self.notifyTabListUiaChanged();
+        // Every tab of an elevated window is elevated, and its caption says
+        // so: the "Administrator: " its shells put before their titles only
+        // takes the label's room.
+        const elevated = win32_elevation.isProcessElevated() catch false;
         for (self.tabs.items, 0..) |*tab, i| {
             const surface = tab.focusedSurface() orelse continue;
-            const title = if (surface.effectiveTitle()) |value| value else null;
+            const title: ?[]const u8 = if (surface.effectiveTitle()) |value|
+                if (elevated) tab_label.withoutAdminPrefix(value) else value
+            else
+                null;
             const label_key = tab_label.key(.{
                 .title = title,
                 .index = i,
@@ -10760,6 +10769,12 @@ pub const Host = struct {
         if (self.new_tab_hwnd) |button_hwnd| {
             const new_tab_width = if (titlebar_actions) action_size else self.scaled(host_tab_small_button_width);
             button_x -= new_tab_width;
+            // Right after the last tab shown, as Windows Terminal puts it,
+            // and never past its place beside the chevron: the strip's width
+            // (`tabStripGeometry`) already leaves that room, so a full strip
+            // ends there.
+            const tabs_end: i32 = @as(i32, @intCast(tab_strip.count)) * button_width + self.scaled(4);
+            if (tab_strip_visible and tabs_end < button_x) button_x = tabs_end;
             changed.* = applyChromeChildRect(
                 button_hwnd,
                 &self.new_tab_placement,

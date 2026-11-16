@@ -514,6 +514,11 @@ pub const Pane = struct {
     /// the server draws fewer pixels and the control scales them up
     /// (`SmartSizing`). A group lowers it under load (`rdp_group.zig`).
     desk_scale_pct: u8 = 100,
+    /// The session keeps its desktop's size whatever the pane's (a group's
+    /// cell, `keepDesktop`): the control scales it down (`SmartSizing`).
+    /// Asking the server for a cell-sized desktop rearranged the windows
+    /// open in it.
+    keep_desktop: bool = false,
     /// The session is being connected again to take new options
     /// (`applyOptions`): the poll connects it, not ends it.
     options_reconnect: bool = false,
@@ -722,9 +727,18 @@ pub const Pane = struct {
         self.pane_w = width;
         self.pane_h = height;
         self.place();
+        if (self.keep_desktop) return;
         const wanted = self.wantedDesktop();
         if (wanted[0] != self.desk_w or wanted[1] != self.desk_h)
             _ = SetTimer(self.hwnd, resize_timer, resize_settle_ms, &resizeTick);
+    }
+
+    /// While `on`, the session keeps its desktop's size and the pane only
+    /// scales it (`keep_desktop`); off, it follows the pane's size again
+    /// from the next `resize` (the tab it moves to gives one).
+    pub fn keepDesktop(self: *Pane, on: bool) void {
+        self.keep_desktop = on;
+        if (on) _ = KillTimer(self.hwnd, resize_timer);
     }
 
     /// The remote desktop's size as a percentage of the pane's
@@ -733,6 +747,7 @@ pub const Pane = struct {
         const clamped = std.math.clamp(pct, 25, 100);
         if (clamped == self.desk_scale_pct) return;
         self.desk_scale_pct = clamped;
+        if (self.keep_desktop) return;
         _ = SetTimer(self.hwnd, resize_timer, resize_settle_ms, &resizeTick);
     }
 
@@ -764,6 +779,7 @@ pub const Pane = struct {
     /// Windows 8.1 / Server 2012 R2) keeps the old size, fitted as before.
     /// Not connected yet: the next connect takes it.
     fn fitSession(self: *Pane) void {
+        if (self.keep_desktop) return;
         const wanted = self.wantedDesktop();
         const w = wanted[0];
         const h = wanted[1];

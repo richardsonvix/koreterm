@@ -14041,7 +14041,7 @@ test "automation explicit-window new_tab reanchors inactive host cwd and overrid
     try std.testing.expectEqual(@as(usize, 2), Hook.pwd_calls);
 }
 
-test "win32 new_tab action inserts after the active tab by default, clears current tab redo, and activates the created tab" {
+test "win32 new_tab action inserts after the active tab with window-new-tab-position current, clears current tab redo, and activates the created tab" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var core_app: CoreApp = undefined;
@@ -14143,6 +14143,8 @@ test "win32 new_tab action inserts after the active tab by default, clears curre
     Hook.host_ref = &host;
     Hook.created_ref = &created;
     app.test_create_window_surface = &Hook.createSurface;
+    // The default is `end` (9eab6c031); this test is about `current`.
+    app.config.@"window-new-tab-position" = .current;
 
     try std.testing.expect(try app.performAction(.app, .new_tab, {}));
     try std.testing.expectEqual(@as(?u32, host.id), Hook.captured_host_id);

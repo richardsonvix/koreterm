@@ -1,3 +1,20 @@
+koreterm 1.3.145
+
+- Remote Desktop groups: Rename Tab on a group's tab names the group, so
+  Save Group keeps the name you gave it. A saved group that is renamed
+  updates its saved entry. A new group gets a "Group N" no saved group
+  has, so saving it no longer replaces a group saved before.
+- Remote Desktop groups no longer change the remote desktops' resolution
+  (that rearranged the windows open on them): each keeps its normal
+  resolution and is shown scaled down in its cell. Under load, a group now
+  lowers only the colors.
+- WSL profiles: a folder like ~/projects/app is the Linux home's (it was
+  read as the Windows home, /mnt/c/Users/...).
+- The + button sits right after the last tab, not at the far right.
+- An administrator window's tabs no longer start with "Administrator: "
+  (the window title still says it), and its menu no longer offers Run as
+  administrator: every tab it opens already is.
+
 koreterm 1.3.144
 
 - Remote Desktop groups: right-click a Remote Desktop tab, Add to Group,

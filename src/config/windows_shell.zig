@@ -592,7 +592,7 @@ fn userProfile(alloc: Allocator, definition: UserProfiles.Definition, expander: 
     const label = try alloc.dupe(u8, definition.name orelse definition.id);
     errdefer alloc.free(label);
     const working_directory = if (definition.working_directory) |raw|
-        try userWorkingDirectory(alloc, raw, definition.global_env, expander)
+        try userWorkingDirectory(alloc, raw, definition.global_env, expander, isWslCommand(command))
     else
         null;
     errdefer if (working_directory) |dir| switch (dir) {
@@ -636,6 +636,7 @@ fn userWorkingDirectory(
     raw: []const u8,
     global_env: []const EnvEntry,
     expander: anytype,
+    wsl: bool,
 ) !WorkingDirectory {
     const expanded = try expandProfileText(alloc, raw, global_env, expander);
     defer alloc.free(expanded);
@@ -643,6 +644,16 @@ fn userWorkingDirectory(
     if (value.len >= 2 and value[0] == '"' and value[value.len - 1] == '"') value = value[1 .. value.len - 1];
     if (std.mem.eql(u8, value, "home")) return .home;
     if (std.mem.eql(u8, value, "inherit")) return .inherit;
+    // A wsl.exe profile's `~` is the Linux home: `~` alone is `.home`
+    // (`--cd ~`), and `~/rest` stays as written for `wsl.exe --cd`, which
+    // expands it (measured: `wsl.exe -d Ubuntu --cd ~/x --exec pwd` printed
+    // /home/<user>/x). The Windows home would give `--cd /mnt/c/Users/...`.
+    if (wsl and std.mem.eql(u8, value, "~")) return .home;
+    if (wsl and isWslHomePath(value)) {
+        const owned = try alloc.dupeZ(u8, value);
+        std.mem.replaceScalar(u8, owned, '\\', '/');
+        return .{ .path = owned };
+    }
     if (value.len >= 2 and value[0] == '~' and (value[1] == '/' or value[1] == '\\')) {
         var buf: [std.fs.max_path_bytes]u8 = undefined;
         if (internal_os.home(&buf) catch null) |home| {
@@ -902,14 +913,21 @@ test "user profile working directories take the working-directory values" {
         .{ .raw = "\"home\"", .want = .home },
         .{ .raw = "C:\\src", .want = .path },
     }) |case| {
-        const dir = try userWorkingDirectory(alloc, case.raw, &.{}, TestEnvironment{});
+        const dir = try userWorkingDirectory(alloc, case.raw, &.{}, TestEnvironment{}, false);
         defer if (dir == .path) alloc.free(dir.path);
         try testing.expectEqual(case.want, std.meta.activeTag(dir));
+    }
+    // A wsl.exe profile's `~` is the Linux home, left for `wsl.exe --cd`.
+    {
+        const dir = try userWorkingDirectory(alloc, "~/projetos\\athenas", &.{}, TestEnvironment{}, true);
+        defer alloc.free(dir.path);
+        try testing.expectEqualStrings("~/projetos/athenas", dir.path);
+        try testing.expectEqual(WorkingDirectory.home, try userWorkingDirectory(alloc, "~", &.{}, TestEnvironment{}, true));
     }
     if (builtin.os.tag == .windows) {
         var buf: [std.fs.max_path_bytes]u8 = undefined;
         if (try internal_os.home(&buf)) |home| {
-            const dir = try userWorkingDirectory(alloc, "~/src", &.{}, TestEnvironment{});
+            const dir = try userWorkingDirectory(alloc, "~/src", &.{}, TestEnvironment{}, false);
             defer alloc.free(dir.path);
             try testing.expect(std.mem.startsWith(u8, dir.path, std.mem.trimRight(u8, home, "\\/")));
             try testing.expect(std.mem.endsWith(u8, dir.path, "\\src"));
@@ -2760,6 +2778,7 @@ pub fn shellPwd(
         if (isDriveAbsolutePath(value)) break :result try alloc.dupe(u8, value);
         if (!is_wsl) break :result null;
         if (std.mem.eql(u8, value, "~")) break :result try alloc.dupe(u8, value);
+        if (isWslHomePath(value)) break :result try alloc.dupe(u8, value);
         if (isWslPath(value)) break :result try normalizeWslPath(alloc, value);
         log.warn("dropping unsupported windows shell pwd cwd={f} is_wsl={}", .{ internal_os.redact.bytes(value), is_wsl });
         break :result null;
@@ -2866,6 +2885,8 @@ fn prepareCommandWithLookup(
     if (!isWslCommand(command)) return try command.clone(alloc);
 
     const target_cwd: ?[]const u8 = cwd_: {
+        // `~/rest` (a WSL profile's directory) is wsl.exe's to expand.
+        if (cwd) |v| if (isWslHomePath(v)) break :cwd_ try alloc.dupe(u8, v);
         if (cwd) |v| break :cwd_ try pathToWsl(alloc, v);
         if (working_directory_home) break :cwd_ try alloc.dupe(u8, "~");
         break :cwd_ null;
@@ -3001,6 +3022,11 @@ pub fn isWslArgv(argv: []const []const u8) bool {
 }
 
 pub const isWslPath = internal_os.path.isWslPath;
+
+/// `~/rest`: a path under the Linux home, which `wsl.exe --cd` expands.
+pub fn isWslHomePath(path: []const u8) bool {
+    return path.len > 2 and path[0] == '~' and path[1] == '/';
+}
 
 /// Translate a Windows or WSL-style path into a WSL path. Returns `null` for
 /// paths we can't confidently map.
@@ -6987,6 +7013,29 @@ test "prepareCommand rewrites wsl home sentinel to explicit --cd" {
     try testing.expectEqualStrings("C:\\Windows\\System32\\wsl.exe", prepared.direct[0]);
     try testing.expectEqualStrings("--cd", prepared.direct[1]);
     try testing.expectEqualStrings("~", prepared.direct[2]);
+}
+
+test "prepareCommand passes a wsl ~/path working directory to --cd as written" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const command = try directCommand(alloc, &.{ "wsl.exe", "-d", "Ubuntu" });
+    defer command.deinit(alloc);
+    const prepared = try prepareCommandWithLookup(alloc, command, "~/projetos/athenas", false, false, struct {
+        fn lookup(a: Allocator, exe: []const u8) !?[]u8 {
+            if (std.mem.eql(u8, exe, "wsl.exe")) return try a.dupe(u8, "C:\\Windows\\System32\\wsl.exe");
+            return null;
+        }
+    }.lookup);
+    defer prepared.deinit(alloc);
+
+    try testing.expect(prepared == .direct);
+    try testing.expectEqualStrings("--cd", prepared.direct[1]);
+    try testing.expectEqualStrings("~/projetos/athenas", prepared.direct[2]);
+
+    const pwd = (try shellPwd(alloc, "~/projetos/athenas", true)).?;
+    defer alloc.free(pwd);
+    try testing.expectEqualStrings("~/projetos/athenas", pwd);
 }
 
 test "prepareCommand replaces existing wsl --cd" {

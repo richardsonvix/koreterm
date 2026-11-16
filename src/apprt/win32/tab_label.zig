@@ -108,6 +108,33 @@ pub fn key(facts: Facts) Key {
     };
 }
 
+/// What an elevated console host puts before a shell's title, in the
+/// languages Windows names it in ("Administrator: Windows PowerShell").
+const admin_title_prefixes = [_][]const u8{
+    "Administrator: ",
+    "Administrador: ",
+    "Administrateur : ",
+    "Administrateur: ",
+    "Amministratore: ",
+};
+
+/// `title` without the "Administrator: " an elevated shell puts before it:
+/// every tab of an elevated window is elevated and the window's caption
+/// says so, so the label keeps its room for the title. Borrowed from `title`.
+pub fn withoutAdminPrefix(title: []const u8) []const u8 {
+    for (admin_title_prefixes) |prefix| {
+        if (title.len > prefix.len and std.ascii.startsWithIgnoreCase(title, prefix)) return title[prefix.len..];
+    }
+    return title;
+}
+
+test "tab label: an elevated shell's Administrator prefix comes off the title" {
+    try std.testing.expectEqualStrings("Windows PowerShell", withoutAdminPrefix("Administrator: Windows PowerShell"));
+    try std.testing.expectEqualStrings("pwsh", withoutAdminPrefix("Administrador: pwsh"));
+    try std.testing.expectEqualStrings("Administrator: ", withoutAdminPrefix("Administrator: "));
+    try std.testing.expectEqualStrings("pwsh", withoutAdminPrefix("pwsh"));
+}
+
 /// The label the tab's button draws: `"* "` on the active tab, the index
 /// from 1, the title compacted to the cells the button leaves it, and the
 /// pane count when the Key shows it; an alerted tab has the bell glyph in

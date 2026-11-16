@@ -140,19 +140,20 @@ pub const Member = struct {
     }
 };
 
-/// The automatic level (`Group.level`): what it does to every session.
+/// The automatic level (`Group.level`): what it does to every session. A
+/// level never changes a remote desktop's size: each keeps the one it had
+/// and its cell scales it (`rdp_pane.Pane.keepDesktop`), since a server
+/// asked for a smaller desktop rearranges the windows open in it.
 pub const Level = struct {
-    /// The remote desktops' size, percent of their cells.
-    scale_pct: u8,
     /// The most bits per pixel asked for.
     max_colors: i32,
 };
 
 pub const levels = [_]Level{
-    .{ .scale_pct = 100, .max_colors = 24 },
-    .{ .scale_pct = 85, .max_colors = 16 },
-    .{ .scale_pct = 70, .max_colors = 16 },
-    .{ .scale_pct = 55, .max_colors = 8 },
+    .{ .max_colors = 24 },
+    .{ .max_colors = 16 },
+    .{ .max_colors = 16 },
+    .{ .max_colors = 8 },
 };
 
 /// The level the number of sessions alone asks for.
@@ -184,7 +185,6 @@ pub const Start = struct {
 
 /// Every group open, for the tab menu's Add to Group. The UI thread's only.
 var all: std.ArrayListUnmanaged(*Group) = .empty;
-var next_number: u32 = 1;
 
 pub fn groups() []const *Group {
     return all.items;
@@ -194,8 +194,13 @@ pub const Group = struct {
     alloc: Allocator,
     hwnd: HWND,
     hooks: Hooks,
-    /// "Group 1": the tab's name when it opens; shown in Add to Group.
+    /// "Group 1": the tab's name when it opens, and after a Rename Tab
+    /// (`rename`); shown in Add to Group and saved under it.
     name: []u8,
+    /// The name of its line in `rdp-groups.txt`, once it has one (saved,
+    /// or opened from a saved line): a rename moves that line
+    /// (`replaceSaved`'s `old_name`) instead of leaving it behind.
+    saved_as: ?[]u8 = null,
     members: std.ArrayListUnmanaged(*Member) = .empty,
     colors: Colors = .c16,
     /// The automatic level from load (`sample`), 0 to `levels.len - 1`.
@@ -217,9 +222,8 @@ pub const Group = struct {
         try registerClass();
         const self = try alloc.create(Group);
         errdefer alloc.destroy(self);
-        const owned_name = if (name) |given| try alloc.dupe(u8, given) else try std.fmt.allocPrint(alloc, "Group {d}", .{next_number});
+        const owned_name = if (name) |given| try alloc.dupe(u8, given) else try defaultName(alloc, "");
         errdefer alloc.free(owned_name);
-        if (name == null) next_number += 1;
         var rect: RECT = undefined;
         if (GetClientRect(parent, &rect) == 0) rect = .{ .left = 0, .top = 0, .right = 800, .bottom = 600 };
         const WS_CHILD: u32 = 0x40000000;
@@ -255,7 +259,25 @@ pub const Group = struct {
         _ = DestroyWindow(self.hwnd);
         if (self.font) |font| _ = DeleteObject(font);
         self.alloc.free(self.name);
+        if (self.saved_as) |saved| self.alloc.free(saved);
         self.alloc.destroy(self);
+    }
+
+    /// Its tab was renamed: the group takes the name (Add to Group, Save).
+    /// False when it already had it.
+    pub fn rename(self: *Group, name: []const u8) !bool {
+        if (name.len == 0 or std.mem.eql(u8, self.name, name)) return false;
+        const owned = try self.alloc.dupe(u8, name);
+        self.alloc.free(self.name);
+        self.name = owned;
+        return true;
+    }
+
+    /// Its line in `rdp-groups.txt` is now the one named `name`.
+    pub fn setSavedAs(self: *Group, name: []const u8) !void {
+        const owned = try self.alloc.dupe(u8, name);
+        if (self.saved_as) |old| self.alloc.free(old);
+        self.saved_as = owned;
     }
 
     fn freeMember(self: *Group, member: *Member) void {
@@ -277,6 +299,7 @@ pub const Group = struct {
         member.* = .{ .group = self, .pane = pane, .label = try self.alloc.dupe(u8, label), .own = own };
         errdefer self.alloc.free(member.label);
         try self.members.append(self.alloc, member);
+        pane.keepDesktop(true);
         pane.reparent(self.hwnd, member.events());
         pane.setInteractive(false);
         self.layout();
@@ -300,7 +323,12 @@ pub const Group = struct {
         errdefer self.alloc.destroy(member);
         member.* = .{ .group = self, .pane = undefined, .label = try self.alloc.dupe(u8, label), .own = own };
         errdefer self.alloc.free(member.label);
-        const pane = make(ctx, self.hwnd, 320, 200, self.memberOptions(own), member.events()) orelse return error.PaneCreationFailed;
+        // The desktop a tab of the group's size would have: its cell only
+        // scales it (`keepDesktop`).
+        var area: RECT = undefined;
+        if (GetClientRect(self.hwnd, &area) == 0 or area.right < 200 or area.bottom < 200) area = .{ .left = 0, .top = 0, .right = 1280, .bottom = 800 };
+        const pane = make(ctx, self.hwnd, area.right, area.bottom, self.memberOptions(own), member.events()) orelse return error.PaneCreationFailed;
+        pane.keepDesktop(true);
         member.pane = pane;
         self.members.append(self.alloc, member) catch |err| {
             pane.destroy();
@@ -327,7 +355,8 @@ pub const Group = struct {
         };
         const pane = member.pane;
         pane.setInteractive(true);
-        pane.setDesktopScale(100);
+        // Its tab's `resize` gives it that tab's size again.
+        pane.keepDesktop(false);
         pane.applyOptions(member.own);
         self.hooks.release(self.hooks.ctx, pane, member.label);
         self.freeMember(member);
@@ -360,21 +389,20 @@ pub const Group = struct {
             .colors = self.effectiveColors(),
             .compression = true,
             .experience = .fast,
-            .scaling = .fill,
+            // The desktop keeps its size, so its cell keeps its proportions.
+            .scaling = .proportional,
             .trust_certificates = own.trust_certificates,
             .audio = false,
         };
     }
 
-    /// Give every session the level in force: its desktop's scale at once,
-    /// its options (colors, a reconnect) when they changed and
+    /// Give every session the level in force: its options (colors, a
+    /// reconnect) when they changed and
     /// `colors_now` or the last change is a minute old.
     fn applyLevel(self: *Group, colors_now: bool) void {
         const now = GetTickCount64();
-        const scale = levels[self.level()].scale_pct;
         var reconnects = false;
         for (self.members.items) |member| {
-            member.pane.setDesktopScale(scale);
             const options = self.memberOptions(member.own);
             if (!member.pane.options.needsReconnect(options)) {
                 member.pane.applyOptions(options);
@@ -527,19 +555,17 @@ pub const Group = struct {
         fill(hdc, header, 0x00242424);
         header.left += self.scaled(8);
         var buf: [256]u8 = undefined;
-        const lvl = levels[self.level()];
         const colors_text = switch (self.effectiveColors()) {
             8 => "256 colors",
             15, 16 => "65 thousand colors",
             else => "16 million colors",
         };
-        const auto = if (self.effectiveColors() < self.colors.bits() or lvl.scale_pct < 100) " (lowered automatically for the load)" else "";
-        const header_text = std.fmt.bufPrint(&buf, "{s}: {d} Remote Desktop{s}, watch only. {s}, {d}% resolution{s}. koreterm CPU {d}%.", .{
+        const auto = if (self.effectiveColors() < self.colors.bits()) " (lowered automatically for the load)" else "";
+        const header_text = std.fmt.bufPrint(&buf, "{s}: {d} Remote Desktop{s}, watch only. {s}{s}. koreterm CPU {d}%.", .{
             self.name,
             self.members.items.len,
             if (self.members.items.len == 1) "" else "s",
             colors_text,
-            lvl.scale_pct,
             auto,
             self.cpu_pct,
         }) catch "";
@@ -772,8 +798,9 @@ pub fn parseSaved(line: []const u8, ids_buf: [][]const u8) ?Saved {
 }
 
 /// `text` (the file) with `line` in place of the line of the same name, or
-/// added last. In `alloc`.
-pub fn replaceSaved(alloc: Allocator, file_text: []const u8, line: []const u8) ![]u8 {
+/// of `old_name` (the group was renamed since it was saved), or added last.
+/// In `alloc`.
+pub fn replaceSaved(alloc: Allocator, file_text: []const u8, line: []const u8, old_name: ?[]const u8) ![]u8 {
     const name_end = std.mem.indexOfScalar(u8, line, '\t') orelse line.len;
     const name = line[0..name_end];
     var out: std.Io.Writer.Allocating = .init(alloc);
@@ -784,7 +811,9 @@ pub fn replaceSaved(alloc: Allocator, file_text: []const u8, line: []const u8) !
         const existing = std.mem.trimRight(u8, raw, "\r");
         if (existing.len == 0) continue;
         const end = std.mem.indexOfScalar(u8, existing, '\t') orelse existing.len;
-        if (std.mem.eql(u8, existing[0..end], name)) {
+        const existing_name = existing[0..end];
+        const was = if (old_name) |old| std.mem.eql(u8, existing_name, old) else false;
+        if (was or std.mem.eql(u8, existing_name, name)) {
             if (!replaced) try out.writer.print("{s}\n", .{line});
             replaced = true;
             continue;
@@ -793,6 +822,29 @@ pub fn replaceSaved(alloc: Allocator, file_text: []const u8, line: []const u8) !
     }
     if (!replaced) try out.writer.print("{s}\n", .{line});
     return try out.toOwnedSlice();
+}
+
+/// "Group N" for a new group, N the smallest that no open group and no
+/// line of `saved_text` (the file) has: the count starts again at every
+/// launch, and a new "Group 1" saved over an old one would replace it.
+pub fn defaultName(alloc: Allocator, saved_text: []const u8) ![]u8 {
+    var n: u32 = 1;
+    while (true) : (n += 1) {
+        const name = try std.fmt.allocPrint(alloc, "Group {d}", .{n});
+        if (!nameTaken(name, saved_text)) return name;
+        alloc.free(name);
+    }
+}
+
+fn nameTaken(name: []const u8, saved_text: []const u8) bool {
+    for (all.items) |group| if (std.mem.eql(u8, group.name, name)) return true;
+    var it = std.mem.splitScalar(u8, saved_text, '\n');
+    while (it.next()) |raw| {
+        const line = std.mem.trimRight(u8, raw, "\r");
+        const end = std.mem.indexOfScalar(u8, line, '\t') orelse line.len;
+        if (std.mem.eql(u8, line[0..end], name)) return true;
+    }
+    return false;
 }
 
 test "rdp group: the grid is square, 2 x 2 at least, a step larger when full" {
@@ -822,10 +874,21 @@ test "rdp group: a saved line reads back and replaces the one of its name" {
     try std.testing.expect(parseSaved("Servers\t8", &ids) == null);
 
     const alloc = std.testing.allocator;
-    const replaced = try replaceSaved(alloc, "A\t8\tx\nServers\t16\told\n", "Servers\t24\tnew");
+    const replaced = try replaceSaved(alloc, "A\t8\tx\nServers\t16\told\n", "Servers\t24\tnew", null);
     defer alloc.free(replaced);
     try std.testing.expectEqualStrings("A\t8\tx\nServers\t24\tnew\n", replaced);
-    const added = try replaceSaved(alloc, "", "B\t8\ty");
+    const added = try replaceSaved(alloc, "", "B\t8\ty", null);
     defer alloc.free(added);
     try std.testing.expectEqualStrings("B\t8\ty\n", added);
+}
+
+test "rdp group: a renamed group's line moves, and a new name skips saved ones" {
+    const alloc = std.testing.allocator;
+    const moved = try replaceSaved(alloc, "Group 1\t16\tweb\nB\t8\ty\n", "Servers\t16\tweb", "Group 1");
+    defer alloc.free(moved);
+    try std.testing.expectEqualStrings("Servers\t16\tweb\nB\t8\ty\n", moved);
+
+    const name = try defaultName(alloc, "Group 1\t16\tweb\r\nGroup 3\t8\tx\n");
+    defer alloc.free(name);
+    try std.testing.expectEqualStrings("Group 2", name);
 }

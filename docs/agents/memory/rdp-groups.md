@@ -28,3 +28,11 @@ Detach and dock are also written, uncompiled, in the same change:
 - `App.detachRdpTab` opens a new window with `adopt_rdp` and sets `Surface.rdp_dock_host`.
 - `App.dockRdpTab` / `dockTarget` move the session back.
 - The tab hover hint for RDP (`Surface.rdpHint`) shows server:port and user.
+
+2026-11-16, built into 1.3.145: Save Group used `Group.name`, which Rename Tab never changed, and "Group N" restarted at 1 every launch, so a new "Group 1" save replaced an older one. Now `setTabTitleOverride` calls `Group.rename`. A group with a saved line (`Group.saved_as`) rewrites that line on rename (`replaceSaved`'s `old_name`). New names skip saved ones (`defaultName`). Covered by the test "a renamed group's line moves". Still missing: an open group does not come back by itself at the next launch.
+
+2026-11-16, built into 1.3.145: a group no longer resizes the remote desktop. The user reported that asking the server for a cell-sized desktop (`UpdateSessionDisplaySettings`, `Level.scale_pct`) rearranged the windows open on it.
+- Members get `Pane.keepDesktop(true)`, with SmartSizing scaling the desktop into the cell, and use `.proportional` scaling.
+- A saved group's new member starts at the grid's full size.
+- Levels lower colors only.
+- `release` turns keepDesktop off, and the adopting tab's `resize` sizes the session again.

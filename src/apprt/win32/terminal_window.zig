@@ -2545,6 +2545,14 @@ pub const Surface = struct {
         try appendOwnedString(alloc, &self.tab_title_override, value);
         try self.refreshWindowTitle();
         self.notifyTerminalUiaNameChanged();
+        // A group tab's Rename Tab names the group: Add to Group lists it,
+        // Save Group saves it under that name, and a saved group's line
+        // follows the rename.
+        if (self.rdp_group) |group| if (value) |name| {
+            if (group.rename(name) catch false) {
+                if (group.saved_as != null) self.writeSavedRdpGroup(group, true);
+            }
+        };
     }
 
     pub fn effectiveTitle(self: *const Surface) ?[:0]const u8 {
@@ -4238,11 +4246,23 @@ pub const Surface = struct {
     fn openRdpGroup(self: *Surface, config: *const configpkg.Config, start: rdp_group_mod.Start) void {
         const hwnd = self.hwnd orelse return;
         const alloc = self.app.core_app.alloc;
-        const group = rdp_group_mod.Group.create(alloc, hwnd, .{ .ctx = self, .release = &rdpGroupRelease }, start.name) catch |err| {
+        // A new group's "Group N" skips the saved ones too, so saving it
+        // never replaces a group saved in an earlier launch.
+        const made_name: ?[]u8 = if (start.name == null) named: {
+            const saved_text = self.readSavedRdpGroups() orelse break :named null;
+            defer alloc.free(saved_text);
+            break :named rdp_group_mod.defaultName(alloc, saved_text) catch null;
+        } else null;
+        defer if (made_name) |name| alloc.free(name);
+        const group = rdp_group_mod.Group.create(alloc, hwnd, .{ .ctx = self, .release = &rdpGroupRelease }, start.name orelse made_name) catch |err| {
             log.warn("rdp group could not be made err={}", .{err});
             return self.showRdpNotice("The group could not be shown.");
         };
         group.colors = start.colors;
+        // Opened from its saved line: a rename moves that line.
+        if (start.name != null and start.saved_ids.len != 0) {
+            group.setSavedAs(group.name) catch {};
+        }
         self.rdp_group = group;
         self.setTabTitleOverride(group.name) catch |err| log.warn("rdp group title failed err={}", .{err});
         var missing: usize = 0;
@@ -4299,6 +4319,13 @@ pub const Surface = struct {
     /// lists to open it again with every session.
     pub fn saveRdpGroup(self: *Surface) void {
         const group = self.rdp_group orelse return;
+        self.writeSavedRdpGroup(group, false);
+    }
+
+    /// `group`'s line in `rdp-groups.txt`, in place of the one of its name
+    /// or of the name it was saved under (`Group.saved_as`). `renamed`: the
+    /// save follows a Rename Tab, and its notice says so.
+    fn writeSavedRdpGroup(self: *Surface, group: *rdp_group_mod.Group, renamed: bool) void {
         const alloc = self.app.core_app.alloc;
         const line = (rdp_group_mod.savedLine(alloc, group) catch null) orelse
             return self.showRdpNotice("Nothing to save: only sessions opened from a profile can be opened again, and this group has none.");
@@ -4310,13 +4337,25 @@ pub const Surface = struct {
             else => return self.showRdpNotice("The group could not be saved: its file could not be read."),
         };
         defer alloc.free(old);
-        const text = rdp_group_mod.replaceSaved(alloc, old, line) catch return;
+        const text = rdp_group_mod.replaceSaved(alloc, old, line, group.saved_as) catch return;
         defer alloc.free(text);
         const file = std.fs.createFileAbsolute(path, .{ .truncate = true }) catch
             return self.showRdpNotice("The group could not be saved: its file could not be written.");
         defer file.close();
         file.writeAll(text) catch return self.showRdpNotice("The group could not be saved: its file could not be written.");
-        self.showRdpNotice("Group saved. Open it again from the new-tab menu (the arrow beside +), Remote Desktop.");
+        group.setSavedAs(group.name) catch {};
+        self.showRdpNotice(if (renamed)
+            "Saved group renamed."
+        else
+            "Group saved. Open it again from the new-tab menu (the arrow beside +), Remote Desktop.");
+    }
+
+    /// `rdp-groups.txt`, in the core allocator, or null when there is none.
+    fn readSavedRdpGroups(self: *Surface) ?[]u8 {
+        const alloc = self.app.core_app.alloc;
+        const path = self.app.localAppDataPath(rdp_group_mod.saved_file) orelse return null;
+        defer alloc.free(path);
+        return std.fs.cwd().readFileAlloc(alloc, path, 1 << 20) catch null;
     }
 
     /// Every session of this tab's group goes back to a tab of its own (the
