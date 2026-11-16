@@ -1,3 +1,13 @@
+koreterm 1.3.146
+
+- Paste works again with a Remote Desktop tab open. Text copied inside a
+  remote desktop no longer keeps the clipboard waiting on the server: when
+  you leave the session (another tab, or another program), koreterm keeps
+  a local copy of it (text, image, HTML, RTF), so Ctrl+V, Ctrl+Shift+V and
+  the right-click menu paste it in any tab. Inside the session, copy and
+  paste work as before. Files copied in the remote desktop still paste in
+  Explorer. A terminal's paste no longer freezes the window.
+
 koreterm 1.3.145
 
 - Remote Desktop groups: Rename Tab on a group's tab names the group, so

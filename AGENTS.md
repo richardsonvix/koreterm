@@ -457,6 +457,8 @@ that govern each symbol you change, or that none does.
   CF_HTML (`win32_clipboard_html.zig`), open retries, what a copy puts on the
   clipboard (formats and owner, as Remote Desktop's redirection sees them),
   the Win32 error a failed copy reports (`clipboard_write.writeCapturing`),
+  a hosted Remote Desktop session's hold on the clipboard
+  (`win32/rdp_clipboard.zig`: `sessionOwner`, `release`, `readText`),
   the empty bracketed paste and the paste of copied files
   (`Surface.completeClipboardPasteWithoutText`, `selectClipboardContents`,
   `win32_ole.extractHdrop`), OSC 52 prompts and

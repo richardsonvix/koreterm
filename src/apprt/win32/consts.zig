@@ -218,6 +218,9 @@ pub const WM_WINHOSTTY_RENDERER_SWITCHED = WM_APP + 17;
 /// Posted by `Host.showConfirmDialog`: the close confirmation's Windows
 /// dialog opens from the loop (`Host.runConfirmDialog`).
 pub const WM_WINHOSTTY_CONFIRM_DIALOG = WM_APP + 18;
+/// A worker read a Remote Desktop session's clipboard for a pane's paste
+/// (`rdp_clipboard.readText`): wParam the request, lParam its `*TextRead`.
+pub const WM_WINHOSTTY_CLIPBOARD_TEXT = WM_APP + 19;
 
 pub const PM_NOREMOVE: UINT = 0x0000;
 pub const PM_REMOVE: UINT = 0x0001;

@@ -258,7 +258,8 @@
         "src/apprt/win32_surface_drop*.zig",
         "src/Surface.zig",
         "src/apprt/win32_ole.zig",
-        "src/apprt/win32/confirm_text.zig"
+        "src/apprt/win32/confirm_text.zig",
+        "src/apprt/win32/rdp_clipboard.zig"
       ]
     },
     {

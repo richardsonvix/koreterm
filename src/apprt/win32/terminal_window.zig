@@ -168,6 +168,7 @@ const windows = win32.windows;
 const windows_shell = @import("../../config/windows_shell.zig");
 const tab_style = @import("tab_style.zig");
 const rdp_pane_mod = @import("rdp_pane.zig");
+const rdp_clipboard = @import("rdp_clipboard.zig");
 const rdp_group_mod = @import("rdp_group.zig");
 const rdp_command_dialog = @import("rdp_command_dialog.zig");
 const profile_credentials = @import("profile_credentials.zig");
@@ -1822,6 +1823,19 @@ pub const Surface = struct {
             };
         }
 
+        // What a Remote Desktop session copied is fetched from its server
+        // through this (UI) thread: read it on a worker thread, which posts
+        // the text back (`completeSessionClipboardRead`), so the window
+        // never waits on the server (`rdp_clipboard.zig`).
+        if (self.app.test_clipboard_source == null and rdp_clipboard.sessionOwns()) {
+            if (self.hwnd) |hwnd| {
+                const kind: usize = if (state == .paste) 0 else 1;
+                if (rdp_clipboard.readText(hwnd, c.WM_WINHOSTTY_CLIPBOARD_TEXT, kind)) |_| {
+                    return true;
+                } else |err| log.warn("session clipboard read thread failed err={}", .{err});
+            }
+        }
+
         // Only a user's paste takes copied files; a program's read is text.
         const include_files = state == .paste;
         const contents = if (self.app.test_clipboard_source) |source|
@@ -1829,6 +1843,33 @@ pub const Surface = struct {
         else
             try self.readClipboard(include_files);
         return self.completeClipboardRead(state, contents);
+    }
+
+    /// The worker's read of a session's clipboard (`clipboardRequest`) is
+    /// back: `kind` 0 a paste, 1 a program's OSC 52 read. Frees `read`.
+    pub fn completeSessionClipboardRead(self: *Surface, kind: usize, read: *rdp_clipboard.TextRead) void {
+        defer read.free();
+        if (!self.core_initialized) return;
+        const state: apprt.ClipboardRequest = if (kind == 0) .paste else .{ .osc_52_read = .standard };
+        if (!read.opened) {
+            log.warn("session clipboard would not open", .{});
+            if (state == .paste) self.showRdpNotice("The clipboard is busy (a Remote Desktop session is answering it): paste again in a moment.");
+            return;
+        }
+        const alloc = self.app.core_app.alloc;
+        const contents: ClipboardContents = if (read.text_w) |text_w| text: {
+            const utf8 = clipboardTextToUtf8(alloc, text_w) catch |err| {
+                log.warn("session clipboard text conversion failed err={}", .{err});
+                return;
+            };
+            break :text .{ .text = lfLineEndings(alloc, utf8) catch |err| {
+                log.warn("session clipboard line endings failed err={}", .{err});
+                return;
+            } };
+        } else .none;
+        _ = self.completeClipboardRead(state, contents) catch |err| {
+            log.warn("session clipboard paste failed err={}", .{err});
+        };
     }
 
     /// Finishes a clipboard request with what the clipboard held, owned by
@@ -4517,6 +4558,9 @@ pub const Surface = struct {
         const focus_state_changed = if (focused) self.app.noteSurfaceFocused(self) else false;
         // After the tab is active, so the caption it rewrites is this tab's.
         if (focused) self.clearBell();
+        // A terminal took the focus from a Remote Desktop session: the
+        // session lets go of the clipboard (`rdp_clipboard.release`).
+        if (focused and self.rdp_pane == null and self.rdp_group == null) rdp_clipboard.release();
         if (!self.core_initialized) return;
         if (focused) self.app.core_app.focusSurface(self.core());
         self.core_surface.focusCallback(focused) catch |err| {

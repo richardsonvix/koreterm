@@ -7,3 +7,5 @@
 - [Build environment](koreterm-build-env.md) — ZIG_GLOBAL_CACHE_DIR on D:, known TABGAP failure, update.zip packaging steps
 - [CI removed](ci-workflows-disabled.md) — fork has no GitHub Actions: workflows disabled then deleted 2026-11-13
 - [Elevated instance](elevated-tab-mark.md) — admin tabs live only in a separate UAC instance; no color mark; prefix stripped, Run-as hidden there; built into 1.3.145
+- [RDP clipboard release](rdp-clipboard-release.md) — RDP tab froze pastes; session keeps clipboard only while focused (built 2026-11-16, unverified)
+- [Tab detach backlog](tab-detach-backlog.md) — pending detach/dock for all tabs, menu only, build + filtered tests

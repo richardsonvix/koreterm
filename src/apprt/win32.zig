@@ -430,6 +430,7 @@ test {
     _ = @import("win32/terminals_import_dialog.zig");
     _ = @import("win32/profile_credentials.zig");
     _ = @import("win32/rdp_pane.zig");
+    _ = @import("win32/rdp_clipboard.zig");
     _ = @import("win32/rdp_command_dialog.zig");
     _ = @import("win32/rdp_connection_dialog.zig");
     _ = @import("win32/preset_dialog.zig");
@@ -11534,6 +11535,9 @@ pub fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
         c.WM_ACTIVATEAPP => {
             // Keys a divider drag held may have gone up in the other app.
             if (host) |v| if (wParam != 0) v.app.reconcilePaneDividerHeldKeys(&App.asyncKeyDown);
+            // Another program is in front: what a Remote Desktop session
+            // copied becomes a local copy it can paste without the session.
+            if (wParam == 0) @import("win32/rdp_clipboard.zig").release();
             return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
         // Per-host tween heartbeat. Runs at ~16 ms while any chrome
@@ -12678,6 +12682,12 @@ pub fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                 if (host.paneDividerAtScreen(lParam) and !v.scrollbarBandAtScreen(hwnd, lParam)) return c.HTTRANSPARENT;
             };
             return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+        },
+
+        c.WM_WINHOSTTY_CLIPBOARD_TEXT => {
+            const read: *@import("win32/rdp_clipboard.zig").TextRead = @ptrFromInt(@as(usize, @bitCast(lParam)));
+            if (surface) |v| v.completeSessionClipboardRead(wParam, read) else read.free();
+            return 0;
         },
 
         c.WM_WINHOSTTY_RENDER_TRACE_SNAPSHOT => {
