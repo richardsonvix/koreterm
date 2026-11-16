@@ -8013,6 +8013,10 @@ pub const Host = struct {
         // edited as a connection instead.
         const is_rdp = if (self.tabs.items[tab_index].focusedSurface()) |surface| surface.rdp_config != null else true;
         if (!is_rdp) _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_TAB_NEW_PROFILE, std.unicode.utf8ToUtf16LeStringLiteral("Create Profile from This Tab..."));
+        // A tab opened from a profile edits that profile.
+        if (self.tabs.items[tab_index].focusedSurface()) |surface| if (surface.launch_profile_key != null and surface.rdp_group == null) {
+            _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_TAB_EDIT_PROFILE, std.unicode.utf8ToUtf16LeStringLiteral("Edit Profile..."));
+        };
         // A command typed or run in the remote desktop: only while its
         // session is up.
         const tab_surface = self.tabs.items[tab_index].focusedSurface();
@@ -8094,6 +8098,11 @@ pub const Host = struct {
                 },
                 c.CTX_TAB_NEW_PROFILE => {
                     newProfileFromSurface(live.app, surface);
+                    return true;
+                },
+                c.CTX_TAB_EDIT_PROFILE => {
+                    // A modal window: the Host may be gone after it.
+                    editProfileOfSurface(live.app, surface);
                     return true;
                 },
                 c.CTX_TAB_RDP_COMMAND => {
@@ -8536,6 +8545,19 @@ pub const Host = struct {
             .folder = folder,
             .font_size = font_size,
         });
+    }
+
+    /// A tab's Edit Profile: the window of the profile it was opened from,
+    /// over Settings, which saves the change and closes again when it was
+    /// not open before.
+    fn editProfileOfSurface(app: *App, surface: *Surface) void {
+        const alloc = app.core_app.alloc;
+        // A copy: the window's loop may close the tab.
+        const key = alloc.dupe(u8, surface.launch_profile_key orelse return) catch return;
+        defer alloc.free(key);
+        const was_open = app.settings_window.hwnd != null;
+        runUiActionOrLog("tab context settings failed", app.performAction(.app, .open_config, {}));
+        app.settings_window.editProfileFromTab(key, !was_open);
     }
 
     /// Whether `profile` opens a Remote Desktop tab (`rdp_pane.targetOf`).

@@ -8642,6 +8642,38 @@ pub const SettingsWindow = struct {
         self.profileEditWindow(null, null, prefill);
     }
 
+    /// A tab's Edit Profile: the window of the profile the tab was opened
+    /// from (`key`, as `Surface.launch_profile_key` holds it: `user:<id>`
+    /// for one of the person's, else a profile koreterm finds), and what it
+    /// changes saved at once. Settings must be open already; `opened_for_it`
+    /// says the caller opened it just for this, so it closes again after.
+    /// Other unsaved changes in an open Settings are not saved with it:
+    /// the edit then waits in the draft, as from the Profiles page.
+    pub fn editProfileFromTab(self: *SettingsWindow, key: []const u8, opened_for_it: bool) void {
+        if (self.hwnd == null) return;
+        self.setActiveSection(.profiles);
+        self.ensureProfileModel();
+        const had_changes = self.hasPendingChanges();
+        const user_prefix = "user:";
+        if (std.ascii.startsWithIgnoreCase(key, user_prefix)) {
+            const id = key[user_prefix.len..];
+            if (self.profileIsRdp(id)) self.profileEditRdp(id) else self.profileEditWindow(id, null, null);
+        } else {
+            const index: ?u32 = for (self.profile_model.profiles, 0..) |profile, i| {
+                if (profile.detected and std.ascii.eqlIgnoreCase(profile.key, key)) break @intCast(i);
+            } else null;
+            if (index) |found| self.profileEditPreset(found) else {
+                return self.setProfileNote(.said, "The profile this tab was opened from is no longer listed.", .{});
+            }
+        }
+        if (had_changes) return;
+        if (self.hasPendingChanges()) {
+            if (opened_for_it) self.close_after_save = true;
+            self.save();
+        }
+        if (opened_for_it and !self.close_posted and !self.hasPendingChanges()) self.postCloseNow();
+    }
+
     /// The window menu's Remote Desktop > Edit connections: the Profiles
     /// page of an open Settings window.
     pub fn showProfilesPage(self: *SettingsWindow) void {

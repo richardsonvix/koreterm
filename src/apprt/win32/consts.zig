@@ -454,6 +454,8 @@ pub const CTX_GROUP_UNGROUP_ALL: usize = 4035;
 /// (`App.detachRdpTab`, `App.dockRdpTab`).
 pub const CTX_TAB_RDP_DETACH: usize = 4036;
 pub const CTX_TAB_RDP_DOCK: usize = 4037;
+/// A tab opened from a profile: Edit Profile (`SettingsWindow.editProfileFromTab`).
+pub const CTX_TAB_EDIT_PROFILE: usize = 4038;
 /// The new-tab menu's Remote Desktop > saved groups: CTX_RDP_SAVED_GROUP_BASE
 /// + the line's index in `rdp-groups.txt`.
 pub const CTX_RDP_SAVED_GROUP_BASE: usize = 4600;

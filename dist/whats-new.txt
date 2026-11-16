@@ -1,3 +1,15 @@
+koreterm 1.3.147
+
+- Edit Profile in a tab's right-click menu: a tab opened from a profile
+  opens that profile's window directly (a Remote Desktop one its
+  connection window), and what you change is saved at once.
+- An update.zip left beside koreterm.exe is installed when koreterm
+  closes: a message says so, and koreterm does not open again by itself.
+- koreterm looks for a newer version on its GitHub releases page once each
+  time it starts (unless auto-update = off). A newer one is downloaded,
+  checked, and offered like an update.zip you copy in yourself.
+- The download now includes an installer (Setup).
+
 koreterm 1.3.146
 
 - Paste works again with a Remote Desktop tab open. Text copied inside a
