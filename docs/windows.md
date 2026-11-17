@@ -1204,7 +1204,21 @@ splits, undo, close confirmation and session restore.
 - **Create Desktop and Start Menu Shortcuts** in the window menu (▾) puts a
   `koreterm.lnk` pointing at this `koreterm.exe` on the Desktop and in the Start
   menu.
-- When the session ends, the tab says so; close it, or open the profile again.
+- When the connection drops (the link, not the server or you ending it),
+  the tab first checks whether the server's port answers, every few
+  seconds and up to 30 minutes, without signing in: a network, Wi-Fi or
+  VPN outage costs no failed logon. Once the port answers it signs in
+  again, at most twice a drop. `rdp-events.log` in koreterm's state folder
+  records the wait.
+- When the session ends, the tab says so: **Reconnect** in its right-click
+  menu starts it again in the same tab, with the connection's current
+  settings and login. Run Command and Server Status still work then, with
+  the profile's login, since they do not need the session.
+- Opening a profile in a new tab replaces the tabs already open from it:
+  each other tab whose only pane came from the same profile closes (Ctrl+
+  Shift+T brings it back). A Remote Desktop tab always closes (a second
+  session of the same login would push the first out); a terminal tab
+  whose program is busy, a tab with splits and a group stay.
 - The tab is named after the connection (its profile's name).
 - Quality: Settings > Shell sets the defaults, `rdp-color-depth` (15, 16, 24
   or 32 bits), `rdp-compression` and `rdp-experience` (`fast`, `balanced`,
@@ -1218,6 +1232,46 @@ splits, undo, close confirmation and session restore.
   the window menu's Remote Desktop > Edit connections) adds a new one. The
   changes are a draft until you Save; the login is kept apart from the config
   as for an import.
+- A connection can also keep an **administrator login** (Admin user and
+  Admin password in its window), for what runs on the server without its
+  screen. It is kept like the other login, never in the config.
+- **Run Command on Remote Desktop...** (the tab's right-click menu) types a
+  command into the session's Run box or a PowerShell window there, or runs
+  it on the server through WinRM (`Invoke-Command`, over HTTPS when that box
+  is checked) and shows its output.
+- Its Server buttons, and **Server Status...** in the tab's menu, go through
+  the server's management (CIM over WinRM, then WMI over DCOM), not its
+  screen, so they work when the remote screen is black or frozen: status
+  (CPU, memory, commit, disks, sessions and whether Explorer runs in each,
+  the busiest processes, stopped automatic services), sign a user out
+  (ending the session's programs when it stays), restart Explorer in a
+  user's session, and force a restart. They need an administrator of the
+  server and its WinRM (5985/5986) or DCOM (135 and the dynamic RPC ports)
+  reachable; when nothing answers, the result lists which ports do.
+  **Trust this server** adds the server to this PC's WinRM TrustedHosts, as
+  administrator, which a server outside your domain needs for WinRM over
+  HTTP.
+- **More** holds the rest, through the same path: critical events of the
+  last 48 hours (unexpected shutdowns 41/6008, restarts asked for 1074,
+  user profile errors 1500-1534, and the System and Application logs'
+  errors), the busiest processes and ending one by its PID, restarting a
+  service by name (its process is ended when it does not stop, unless
+  other services share it), starting the stopped automatic services,
+  whether a restart is pending (Windows Update, installed components,
+  files to replace), a restart scheduled for an HH:MM of the server's
+  clock and cancelling it, disconnecting a user's session (its programs
+  keep running), and the largest folders of a drive (through PowerShell
+  remoting only, counting for up to 100 seconds). The field beside Session
+  user takes the PID, service, time or folder.
+- **More > Prepare server for remote management** makes the server
+  reachable for all of this while it still works: koreterm types a command
+  into the session that opens an administrator PowerShell there (click Yes
+  at Windows' prompt on the remote screen), and that window turns
+  PowerShell remoting on, opens the WinRM and WMI firewall rules to the
+  address this PC connects from only, and sets
+  `LocalAccountTokenFilterPolicy = 1`. The script travels on the shared
+  clipboard, and the window runs it only when it starts with
+  `#koreterm-prepare`.
 
 ### Listing profiles
 
@@ -2066,6 +2120,29 @@ read-only: Enter opens the config file, where bindings are changed, and Ctrl+C
 copies the binding as `keybind = ...` lines to paste there. The search covers
 the bindings too, by keys, action and description, and counts each as one
 match on this page; `@modified` keeps the ones the defaults do not have.
+
+### Tab snapshots and recordings
+
+Any tab's right-click menu (a terminal or a Remote Desktop tab):
+
+- **Save Snapshot of Tab** saves a PNG of the tab's area (its splits
+  included) at its full size.
+- **Record Tab** records it as an MP4 video (H.264, written by Windows' Media
+  Foundation). The tab turns red while it records, and its menu then has
+  **Stop Recording**. One tab records at a time; another tab's menu offers to
+  stop it. Closing the tab stops and saves the recording.
+
+Both read the tab off the screen, so only what can be seen is captured:
+while the tab is behind another tab, minimized or covered by another window,
+a recording holds its last picture, and a snapshot is refused.
+
+`tab-capture-folder` (Settings > Terminal, "Snapshot and recording folder")
+is where they are saved; blank, the default, is your Downloads folder. Files
+are named `koreterm <tab title> <date> <time>.png` or `.mp4`.
+`tab-capture-quality` (`low`, `normal`, `high`) sets the video's frame rate,
+largest width and bitrate: 5, 10 or 20 frames a second, at most 1280, 1920
+or 2560 pixels wide. A snapshot is always full size. A Windows N edition
+needs the Media Feature Pack to record.
 
 ## Running elevated
 

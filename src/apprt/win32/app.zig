@@ -6177,6 +6177,47 @@ pub const App = struct {
         });
     }
 
+    /// Opening a profile in a new tab replaces the tabs already open from
+    /// it: every other tab, in any window, whose only pane was opened from
+    /// the same profile (`launch_profile_key`, by `storedProfileKeyEquals`)
+    /// closes, undoably (Ctrl+Shift+T), when it would close without asking:
+    /// a Remote Desktop tab always (a second session of the same login
+    /// pushes the first out anyway, and an ended one is only a placeholder);
+    /// a terminal whose program is busy (`needsConfirmQuitNoWait`) stays, as
+    /// does a tab with splits or a group.
+    pub fn closeSameProfileTabs(self: *App, opened: *Surface) void {
+        const key = opened.launch_profile_key orelse return;
+        const Victim = struct { host_id: u32, tab_id: u32 };
+        var victims: [64]Victim = undefined;
+        var count: usize = 0;
+        for (self.registry.windows.items) |surface| {
+            if (surface == opened or count == victims.len) continue;
+            if (surface.rdp_group != null) continue;
+            const other = surface.launch_profile_key orelse continue;
+            if (!windows_shell.storedProfileKeyEquals(key, other)) continue;
+            const found = Host.findTabForSurface(surface) orelse continue;
+            if (found.tab.leafCount() != 1 or found.tab.findHandle(opened) != null) continue;
+            const remote_desktop = surface.rdp_config != null;
+            if (!remote_desktop) {
+                if (!surface.core_initialized) continue;
+                const busy = surface.core().needsConfirmQuitNoWait() orelse true;
+                if (busy) continue;
+            }
+            victims[count] = .{ .host_id = found.host.id, .tab_id = found.tab.id };
+            count += 1;
+        }
+        for (victims[0..count]) |victim| {
+            // A close can take its window, and with it others' indexes:
+            // each is found again by its ids.
+            const host = self.registry.findHostById(victim.host_id) orelse continue;
+            const index = host.findTabIndexById(victim.tab_id) orelse continue;
+            _ = self.closeTabUndoable(host, index) catch |err| {
+                log.warn("same-profile tab close failed err={}", .{err});
+            };
+        }
+        if (count != 0) self.activateSurface(opened);
+    }
+
     /// A tab, beside `source`, showing the Remote Desktop session `pane`
     /// that left a group (`rdp_group.zig`), named `label`. The pane is the
     /// tab's once this returns; on an error it is still the caller's.

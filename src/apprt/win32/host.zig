@@ -232,6 +232,12 @@ const win32_undo = @import("../win32_undo.zig");
 const window_state = @import("window_state.zig");
 const windows_shell = @import("../../config/windows_shell.zig");
 const tab_style = @import("tab_style.zig");
+const tab_capture = @import("tab_capture.zig");
+/// A recording tab's colors (COLORREF 0x00BBGGRR): a deep red, a brighter
+/// red edge, and white text.
+const recording_tab_bg: u32 = 0x002020B4;
+const recording_tab_border: u32 = 0x003838E0;
+const recording_tab_fg: u32 = 0x00FFFFFF;
 
 // Test dependencies.
 const builtin = @import("builtin");
@@ -5329,6 +5335,10 @@ pub const Host = struct {
             runUiActionOrLog("profile launch layout failed", self.layout());
         }
         self.app.activateSurface(surface);
+        // The new tab replaces the ones already open from this profile.
+        // This Host can close with its last tab: nothing of it is read
+        // after.
+        if (open_target == .tab) self.app.closeSameProfileTabs(surface);
         return true;
     }
 
@@ -7995,6 +8005,8 @@ pub const Host = struct {
     /// tab could not be activated. `self` may be gone when it returns true:
     /// closing a window's only tab closes the window.
     pub fn showTabContextMenu(self: *Host, button_hwnd: HWND, tab_index: usize, origin: TabMenuOrigin) bool {
+        // Its labels are UTF-16 literals made at compile time.
+        @setEvalBranchQuota(20000);
         const app = self.app;
         const host_id = self.id;
         const hwnd = self.hwnd orelse return false;
@@ -8017,13 +8029,33 @@ pub const Host = struct {
         if (self.tabs.items[tab_index].focusedSurface()) |surface| if (surface.launch_profile_key != null and surface.rdp_group == null) {
             _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_TAB_EDIT_PROFILE, std.unicode.utf8ToUtf16LeStringLiteral("Edit Profile..."));
         };
+        // A snapshot or a recording of the tab (`tab_capture`): one tab
+        // records at a time, and every tab's menu can stop it.
+        {
+            _ = sys.AppendMenuW(menu, c.MF_SEPARATOR, 0, null);
+            _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_TAB_SNAPSHOT, std.unicode.utf8ToUtf16LeStringLiteral("Save Snapshot of Tab"));
+            const recording_here = if (tab_capture.recordingOwner()) |owner| self.tabs.items[tab_index].findHandle(@ptrCast(@alignCast(owner))) != null else false;
+            const record_label = if (recording_here)
+                std.unicode.utf8ToUtf16LeStringLiteral("Stop Recording")
+            else if (tab_capture.recordingOwner() != null)
+                std.unicode.utf8ToUtf16LeStringLiteral("Stop Recording (Another Tab)")
+            else
+                std.unicode.utf8ToUtf16LeStringLiteral("Record Tab");
+            _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_TAB_RECORD, record_label);
+            _ = sys.AppendMenuW(menu, c.MF_SEPARATOR, 0, null);
+        }
         // A command typed or run in the remote desktop: only while its
         // session is up.
         const tab_surface = self.tabs.items[tab_index].focusedSurface();
         const group_tab: ?*rdp_group.Group = if (tab_surface) |surface| surface.rdp_group else null;
         if (is_rdp and group_tab == null) {
             const live_session = if (tab_surface) |surface| surface.rdp_pane != null else false;
-            _ = sys.AppendMenuW(menu, if (live_session) c.MF_STRING else c.MF_GRAYED, c.CTX_TAB_RDP_COMMAND, std.unicode.utf8ToUtf16LeStringLiteral("Run Command on Remote Desktop..."));
+            // A session that ended comes back from here, in the same tab.
+            if (!live_session) _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_TAB_RDP_RECONNECT, std.unicode.utf8ToUtf16LeStringLiteral("Reconnect"));
+            // Both reach the server without the session too (a frozen
+            // server drops it): its Server buttons and Server Status.
+            _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_TAB_RDP_COMMAND, std.unicode.utf8ToUtf16LeStringLiteral("Run Command on Remote Desktop..."));
+            _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_TAB_RDP_STATUS, std.unicode.utf8ToUtf16LeStringLiteral("Server Status (CPU, Memory, Disks)..."));
             // Add to Group: a new group's tab, or one already open.
             if (sys.CreatePopupMenu()) |group_menu| {
                 _ = sys.AppendMenuW(group_menu, c.MF_STRING, c.CTX_TAB_RDP_GROUP_NEW, std.unicode.utf8ToUtf16LeStringLiteral("New Group"));
@@ -8092,6 +8124,20 @@ pub const Host = struct {
                 if (at < open_groups.len) surface.addToRdpGroup(open_groups[at]);
                 return true;
             }
+            // A snapshot or a recording works on any tab, whatever it
+            // holds (a terminal, a Remote Desktop session, a group) and
+            // however far it has started: it reads the screen.
+            switch (picked) {
+                c.CTX_TAB_SNAPSHOT => {
+                    surface.snapshotTab();
+                    return true;
+                },
+                c.CTX_TAB_RECORD => {
+                    surface.toggleTabRecording();
+                    return true;
+                },
+                else => {},
+            }
             if (surface.core_initialized) switch (@as(usize, @intCast(cmd))) {
                 c.CTX_TAB_RENAME => {
                     runUiActionOrLog("tab context rename failed", surface.promptTitle(.tab));
@@ -8107,7 +8153,16 @@ pub const Host = struct {
                 },
                 c.CTX_TAB_RDP_COMMAND => {
                     // A modal window: the Host may be gone after it.
-                    surface.openRdpCommandDialog();
+                    surface.openRdpCommandDialog(.command);
+                    return true;
+                },
+                c.CTX_TAB_RDP_RECONNECT => {
+                    surface.reconnectRdp();
+                    return true;
+                },
+                c.CTX_TAB_RDP_STATUS => {
+                    // A modal window: the Host may be gone after it.
+                    surface.openRdpCommandDialog(.status);
                     return true;
                 },
                 c.CTX_TAB_RDP_DETACH => {
@@ -8986,9 +9041,15 @@ pub const Host = struct {
             }
         }
         if (tab_button and !disabled) colors.fg = win32_theme.windowChromeTextColor(tab_theme, colors.fg, self.window_active, is_hc);
-        const bg = colors.bg;
-        const border = colors.border;
-        const fg = colors.fg;
+        // A tab that records is red (`tab_capture`).
+        const recording_tab = tab_button and !overlay and !is_hc and recording: {
+            const owner = tab_capture.recordingOwner() orelse break :recording false;
+            const index = self.tabIndexForButton(draw.hwndItem) orelse break :recording false;
+            break :recording self.tabs.items[index].findHandle(@ptrCast(@alignCast(owner))) != null;
+        };
+        const bg = if (recording_tab) recording_tab_bg else colors.bg;
+        const border = if (recording_tab) recording_tab_border else colors.border;
+        const fg = if (recording_tab) recording_tab_fg else colors.fg;
 
         const content_top_inset = if (tab_button) self.tabContentTopInset() else 0;
         // Erase with parent background, then draw rounded button

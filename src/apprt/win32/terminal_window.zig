@@ -171,6 +171,7 @@ const rdp_pane_mod = @import("rdp_pane.zig");
 const rdp_clipboard = @import("rdp_clipboard.zig");
 const rdp_group_mod = @import("rdp_group.zig");
 const rdp_command_dialog = @import("rdp_command_dialog.zig");
+const tab_capture = @import("tab_capture.zig");
 const profile_credentials = @import("profile_credentials.zig");
 const writeImeWindowFormsTrace = win32.writeImeWindowFormsTrace;
 
@@ -4237,6 +4238,7 @@ pub const Surface = struct {
             .released = &rdpReleased,
             .connected = &rdpConnected,
             .sent = &rdpSent,
+            .waiting = &rdpWaiting,
         };
     }
 
@@ -4442,7 +4444,28 @@ pub const Surface = struct {
             _ = sys.SetFocus(hwnd);
         };
         self.requestRepaint() catch {};
-        self.showRdpNotice("The Remote Desktop session ended. Open the profile again to reconnect.");
+        self.showRdpNotice("The Remote Desktop session ended. Right-click the tab and pick Reconnect, or open the profile again.");
+    }
+
+    /// The session dropped and its server does not answer: the pane waits
+    /// for the network before it signs in again (`Pane.networkReady`).
+    fn rdpWaiting(ctx: *anyopaque) void {
+        const self: *Surface = @ptrCast(@alignCast(ctx));
+        self.showRdpNotice("Remote Desktop: the connection dropped and the server does not answer (is this PC's network, Wi-Fi or VPN down?). The tab waits for it, up to 30 minutes, and reconnects by itself.");
+    }
+
+    /// The tab menu's "Reconnect": a new session for an RDP tab whose
+    /// session ended, with the config as it is now (an edited connection
+    /// takes its new settings and login).
+    pub fn reconnectRdp(self: *Surface) void {
+        if (self.rdp_pane != null) return self.showRdpNotice("The Remote Desktop session is still open.");
+        var buf: [1024]u8 = undefined;
+        const target = self.rdpTarget(&buf) orelse
+            return self.showRdpNotice("This tab cannot reconnect by itself: open the profile again.");
+        self.openRdpPane(&self.app.config, target);
+        if (self.rdp_pane == null) return self.showRdpNotice("The Remote Desktop session could not start again.");
+        self.resizeRdpPane();
+        self.showRdpNotice("Reconnecting the Remote Desktop session...");
     }
 
     /// Ctrl+Alt+Home in the Remote Desktop session: the keyboard comes back
@@ -4471,30 +4494,69 @@ pub const Surface = struct {
         });
     }
 
-    /// The tab menu's "Run Command on Remote Desktop...": the command window
-    /// (`rdp_command_dialog`), then what it asks for sent into the session.
-    /// A WinRM command has run, with its result shown, by the time it
-    /// returns.
-    pub fn openRdpCommandDialog(self: *Surface) void {
-        const pane = self.rdp_pane orelse return self.showRdpNotice("This tab has no Remote Desktop session open.");
+    /// The tab menu's "Run Command on Remote Desktop..." and "Server
+    /// Status...": the command window (`rdp_command_dialog`), then what it
+    /// asks for sent into the session. A WinRM command or a Server button has
+    /// run, with its result shown, by the time it returns. The window signs
+    /// in with the profile's administrator login when it keeps one
+    /// (`profile_credentials.adminId`).
+    pub fn openRdpCommandDialog(self: *Surface, start: rdp_command_dialog.Start) void {
         const alloc = self.app.core_app.alloc;
         var arena: std.heap.ArenaAllocator = .init(alloc);
         defer arena.deinit();
         const a = arena.allocator();
+        // A session that ended (a frozen server drops it) still has its
+        // server and its profile's login: Server Status and the Server
+        // buttons work without the session; what types into it does not.
+        var target_buf: [1024]u8 = undefined;
+        var offline_entry: ?profile_credentials.Entry = null;
+        defer if (offline_entry) |entry| entry.deinit(alloc);
+        const login: rdp_pane_mod.Remoting = if (self.rdp_pane) |pane| pane.remoting() else offline: {
+            const target = self.rdpTarget(&target_buf) orelse return self.showRdpNotice("This tab has no Remote Desktop connection.");
+            var profile_id: ?[]const u8 = null;
+            for (self.app.config.@"profile-command".entries.items) |entry| {
+                if (entry.removed) continue;
+                const other = rdp_pane_mod.targetOf(entry.value) orelse continue;
+                if (other.port != target.port or !std.ascii.eqlIgnoreCase(other.server, target.server)) continue;
+                if (profile_id == null) profile_id = entry.id;
+                offline_entry = profile_credentials.readEntry(alloc, entry.id) catch null;
+                if (offline_entry != null) {
+                    profile_id = entry.id;
+                    break;
+                }
+            }
+            break :offline .{
+                .server = target.server,
+                .user = if (offline_entry) |entry| entry.user else target.user,
+                .password = if (offline_entry) |entry| entry.password else null,
+                .profile_id = profile_id,
+                .port = target.port,
+            };
+        };
         // Copies: the window's loop can end the session and free the pane.
-        const login = pane.remoting();
         const server = a.dupe(u8, login.server) catch return;
         const user = a.dupe(u8, login.user) catch return;
         const password: ?[]u8 = if (login.password) |text| (a.dupe(u8, text) catch return) else null;
         defer if (password) |text| @memset(text, 0);
         const title = a.dupe(u8, self.effectiveTitle() orelse "") catch return;
+        const profile_id: ?[]u8 = if (login.profile_id) |id| (a.dupe(u8, id) catch return) else null;
+        var admin: ?profile_credentials.Entry = null;
+        defer if (admin) |entry| entry.deinit(alloc);
+        if (profile_id) |id| {
+            var id_buf: [128]u8 = undefined;
+            if (profile_credentials.adminId(&id_buf, id)) |admin_id| admin = profile_credentials.readEntry(alloc, admin_id) catch null;
+        }
         const owner = self.windowHwnd();
         const request = rdp_command_dialog.run(a, owner, .{
             .server = server,
             .user = user,
             .password = password,
             .title = title,
-        }) catch return self.showRdpNotice("The command window could not open.");
+            .admin_user = if (admin) |entry| entry.user else "",
+            .admin_password = if (admin) |entry| (if (entry.password.len != 0) entry.password else null) else null,
+            .profile_id = profile_id,
+            .port = login.port,
+        }, start) catch return self.showRdpNotice("The command window could not open.");
         if (request == .none) return;
         // The session the window was opened for, if it is still there.
         const now = self.rdp_pane orelse return self.showRdpNotice("The Remote Desktop session ended: nothing was sent.");
@@ -4508,7 +4570,131 @@ pub const Surface = struct {
                 now.typeRunLine(line) catch |err| return self.rdpSendRefused(err);
                 self.showRdpNotice("Typing the command into the remote desktop's Run box...");
             },
+            .prepare => |prepare| {
+                now.typeRunLineThen(prepare.line, prepare.clipboard) catch |err| return self.rdpSendRefused(err);
+                self.showRdpNotice("Preparing the server: on the remote screen, Windows asks for administrator permission; click Yes. A PowerShell window then sets it up and says when it is done.");
+            },
         }
+    }
+
+    // --- Snapshot and recording of the tab (`tab_capture`) ---------------
+
+    /// The tab menu's "Save Snapshot of Tab": a PNG of the tab's area, a
+    /// moment after the menu has gone, in `tab-capture-folder` (or
+    /// Downloads). A banner says where it went.
+    pub fn snapshotTab(self: *Surface) void {
+        const alloc = self.app.core_app.alloc;
+        const dir = tab_capture.folder(alloc, self.app.config.@"tab-capture-folder") catch
+            return self.showCaptureNotice("No snapshot: the Downloads folder could not be found. Set a folder in Settings > Terminal.");
+        defer alloc.free(dir);
+        tab_capture.snapshot(alloc, self, self.captureTarget(), dir, self.effectiveTitle() orelse "tab") catch |err| switch (err) {
+            error.Busy => self.showCaptureNotice("A snapshot is already being taken."),
+            else => self.showCaptureNotice("No snapshot: it could not be started."),
+        };
+    }
+
+    /// The tab menu's "Record Tab" and "Stop Recording": an MP4 of the tab
+    /// at `tab-capture-quality`, one tab at a time. The tab is red while it
+    /// records.
+    pub fn toggleTabRecording(self: *Surface) void {
+        const alloc = self.app.core_app.alloc;
+        if (tab_capture.recordingOwner()) |owner| {
+            const recording: *Surface = @ptrCast(@alignCast(owner));
+            return recording.stopTabRecording();
+        }
+        const dir = tab_capture.folder(alloc, self.app.config.@"tab-capture-folder") catch
+            return self.showCaptureNotice("Not recording: the Downloads folder could not be found. Set a folder in Settings > Terminal.");
+        defer alloc.free(dir);
+        const quality: tab_capture.Quality = switch (self.app.config.@"tab-capture-quality") {
+            .low => .low,
+            .normal => .normal,
+            .high => .high,
+        };
+        tab_capture.start(alloc, self, self.captureTarget(), dir, self.effectiveTitle() orelse "tab", quality) catch |err| {
+            return self.showCaptureNotice(switch (err) {
+                error.AlreadyRecording => "Another tab is recording: stop it first.",
+                error.NotVisible => "Not recording: the tab is hidden, minimized or covered by another window.",
+                error.MediaFoundationMissing => "Not recording: this Windows has no Media Foundation (a Windows N edition needs the Media Feature Pack).",
+                error.EncoderFailed => "Not recording: the video encoder did not start.",
+                error.WriteFailed => "Not recording: the video file could not be made in the recording folder (Settings > Terminal).",
+                error.CanvasFailed, error.OutOfMemory => "Not recording: out of memory.",
+            });
+        };
+        self.repaintCaptureTab();
+        self.showCaptureNotice("Recording this tab. It is red while it records; Stop Recording is in its right-click menu. While the tab is hidden or covered, the video holds its last picture.");
+    }
+
+    /// Stop this pane's recording and say where the video is.
+    fn stopTabRecording(self: *Surface) void {
+        const alloc = self.app.core_app.alloc;
+        const stopped = tab_capture.stop() orelse return;
+        defer alloc.free(stopped.path);
+        self.repaintCaptureTab();
+        const message = std.fmt.allocPrint(alloc, "{s} {s} ({d}:{d:0>2})", .{
+            if (stopped.failed) "The recording stopped with an encoder error; the video may be cut short:" else "Recording saved:",
+            stopped.path,
+            stopped.seconds / 60,
+            stopped.seconds % 60,
+        }) catch return self.showCaptureNotice("Recording saved.");
+        defer alloc.free(message);
+        self.showCaptureNotice(message);
+    }
+
+    fn repaintCaptureTab(self: *Surface) void {
+        const found = Host.findTabForSurface(self) orelse return;
+        if (found.tab.button_hwnd) |button| _ = sys.InvalidateRect(button, null, 0);
+    }
+
+    fn captureTarget(self: *Surface) tab_capture.Target {
+        return .{ .ctx = self, .rect = captureRect, .notify = captureNotify };
+    }
+
+    /// The area of this pane's tab on the screen (its splits included),
+    /// when it can be seen: its tab in front, its window shown and not
+    /// minimized, and no other window over it (checked at its center and
+    /// near its corners).
+    fn captureRect(ctx: *anyopaque) ?tab_capture.Rect {
+        const self: *Surface = @ptrCast(@alignCast(ctx));
+        const found = Host.findTabForSurface(self) orelse return null;
+        const host = found.host;
+        if (found.index != host.active_tab) return null;
+        const top = host.hwnd orelse return null;
+        if (sys.IsWindowVisible(top) == 0 or sys.IsIconic(top) != 0) return null;
+        const content = host.contentRect() catch return null;
+        var corner: POINT = .{ .x = content.left, .y = content.top };
+        var far: POINT = .{ .x = content.right, .y = content.bottom };
+        if (sys.ClientToScreen(top, &corner) == 0 or sys.ClientToScreen(top, &far) == 0) return null;
+        const rect: tab_capture.Rect = .{ .left = corner.x, .top = corner.y, .right = far.x, .bottom = far.y };
+        if (rect.width() < 2 or rect.height() < 2) return null;
+        const GA_ROOT: u32 = 2;
+        const inset_x = @divTrunc(rect.width(), 10);
+        const inset_y = @divTrunc(rect.height(), 10);
+        const probes = [_]POINT{
+            .{ .x = rect.left + @divTrunc(rect.width(), 2), .y = rect.top + @divTrunc(rect.height(), 2) },
+            .{ .x = rect.left + inset_x, .y = rect.top + inset_y },
+            .{ .x = rect.right - inset_x, .y = rect.top + inset_y },
+            .{ .x = rect.left + inset_x, .y = rect.bottom - inset_y },
+            .{ .x = rect.right - inset_x, .y = rect.bottom - inset_y },
+        };
+        for (probes) |point| {
+            const at = sys.WindowFromPoint(point) orelse return null;
+            const root = sys.GetAncestor(at, GA_ROOT) orelse return null;
+            if (root != top) return null;
+        }
+        return rect;
+    }
+
+    fn captureNotify(ctx: *anyopaque, message: []const u8) void {
+        const self: *Surface = @ptrCast(@alignCast(ctx));
+        self.showCaptureNotice(message);
+    }
+
+    fn showCaptureNotice(self: *Surface, message: []const u8) void {
+        // A pane still starting has no core to hang a banner on.
+        if (!self.core_initialized) return log.info("capture notice skipped: pane not started", .{});
+        _ = self.app.showHostBanner(.{ .surface = self.core() }, .info, message) catch |err| {
+            log.warn("capture notice failed err={}", .{err});
+        };
     }
 
     fn rdpSendRefused(self: *Surface, err: rdp_pane_mod.SendError) void {
@@ -5057,6 +5243,9 @@ pub const Surface = struct {
         self.destroy_on_wm_destroy = false;
         self.deferred_char.clear();
         self.closeQuickSelect(false);
+        // A snapshot waiting for this pane is dropped, and its recording
+        // finished, before anything it reads goes.
+        tab_capture.forget(self);
         // The Remote Desktop session ends with its pane, and a group's
         // sessions with its tab (a closing tab lets them go first).
         if (self.rdp_pane) |pane| {

@@ -61,7 +61,7 @@ pub const placeholder_argv = [_][:0]const u8{
     "/d",
     "/q",
     "/c",
-    "echo Remote Desktop session. When it ends, close this tab (Ctrl+Shift+W) or open the profile again.& timeout /t -1 /nobreak >nul",
+    "echo Remote Desktop session. When it ends, right-click this tab and pick Reconnect, or close it with Ctrl+Shift+W.& timeout /t -1 /nobreak >nul",
 };
 
 // --- COM ----------------------------------------------------------------
@@ -388,6 +388,9 @@ pub const Events = struct {
     connected: *const fn (ctx: *anyopaque) void,
     /// A line typed into the remote Run box (`Pane.typeRunLine`) is done.
     sent: *const fn (ctx: *anyopaque, outcome: Sent) void,
+    /// The session dropped and the server's port does not answer: the pane
+    /// waits for the network before it signs in again.
+    waiting: ?*const fn (ctx: *anyopaque) void = null,
 };
 
 /// What `Pane.typeRunLine` came to. Keys reaching the session are all that
@@ -417,6 +420,12 @@ pub const Remoting = struct {
     server: []const u8,
     user: []const u8,
     password: ?[]const u8,
+    /// The profile the connection is, when it is one: its administrator
+    /// login (`profile_credentials.adminId`) is kept under it.
+    profile_id: ?[]const u8 = null,
+    /// The Remote Desktop port, which Prepare server finds this PC's
+    /// address by on the server.
+    port: u16 = 3389,
 };
 
 /// What the pane signs in with.
@@ -484,6 +493,67 @@ const max_reconnects: u32 = 2;
 /// Polls (seconds) between a drop and each reconnect.
 const reconnect_delay_polls: u32 = 15;
 
+/// How long a dropped session waits for its server's port to answer again
+/// before the tab says it ended, in polls (seconds): 30 minutes. A wait
+/// signs in nowhere, so it costs no logon: only the reconnects do.
+const max_offline_polls: u32 = 30 * 60;
+/// Polls between two checks of the server's port while it waits.
+const probe_every_polls: u32 = 5;
+
+/// One check, on its own thread, of whether the server's port takes a TCP
+/// connection: a Windows sign-in is never tried, so a link that is down
+/// costs no failed logon. The pane and the thread each hold a reference;
+/// the last to let go frees it (the pane may be gone first).
+const Probe = struct {
+    host: []u8,
+    port: u16,
+    /// 0 still checking, 1 the port answered, 2 it did not.
+    state: std.atomic.Value(u8) = .init(0),
+    refs: std.atomic.Value(u8) = .init(2),
+
+    const Result = enum { checking, answered, silent };
+
+    fn start(host: []const u8, port: u16) ?*Probe {
+        const alloc = std.heap.page_allocator;
+        const probe = alloc.create(Probe) catch return null;
+        const copy = alloc.dupe(u8, host) catch {
+            alloc.destroy(probe);
+            return null;
+        };
+        probe.* = .{ .host = copy, .port = port };
+        const thread = std.Thread.spawn(.{}, run, .{probe}) catch {
+            alloc.free(copy);
+            alloc.destroy(probe);
+            return null;
+        };
+        thread.detach();
+        return probe;
+    }
+
+    fn run(self: *Probe) void {
+        const answered = if (std.net.tcpConnectToHost(std.heap.page_allocator, self.host, self.port)) |stream| answered: {
+            stream.close();
+            break :answered true;
+        } else |_| false;
+        self.state.store(if (answered) 1 else 2, .release);
+        self.release();
+    }
+
+    fn result(self: *Probe) Result {
+        return switch (self.state.load(.acquire)) {
+            0 => .checking,
+            1 => .answered,
+            else => .silent,
+        };
+    }
+
+    fn release(self: *Probe) void {
+        if (self.refs.fetchSub(1, .acq_rel) != 1) return;
+        std.heap.page_allocator.free(self.host);
+        std.heap.page_allocator.destroy(self);
+    }
+};
+
 const Drop = enum { wait, reconnect, end };
 
 /// What the poll does once the control reports no connection. A session
@@ -512,6 +582,15 @@ pub const Pane = struct {
     /// Where a line typed into the Run box is (`typeRunLine`): 0 none,
     /// 1 the Run box asked for, 2 the line pasted.
     send_step: u8 = 0,
+    /// UTF-16 text for the clipboard once the typed line's Enter has gone
+    /// (`typeRunLineThen`).
+    clipboard_after: ?[]u16 = null,
+    /// The check of the server's port under way while a dropped session
+    /// waits for the network (`networkReady`), and the polls it has waited.
+    probe: ?*Probe = null,
+    offline_polls: u32 = 0,
+    /// The wait for the network was said (`Events.waiting`) and logged.
+    told_waiting: bool = false,
     user: []u8 = &.{},
     password: ?[]u8 = null,
     started: bool = false,
@@ -902,7 +981,7 @@ pub const Pane = struct {
 
     /// The server and login, for PowerShell remoting. Borrowed.
     pub fn remoting(self: *const Pane) Remoting {
-        return .{ .server = self.server, .user = self.user, .password = self.password };
+        return .{ .server = self.server, .user = self.user, .password = self.password, .profile_id = self.profile_id, .port = self.port };
     }
 
     /// Type `line` into the remote desktop's Run box: the line goes on the
@@ -910,8 +989,18 @@ pub const Pane = struct {
     /// message loop Ctrl+V and Enter (`sendTick`). `Events.sent` says how it
     /// went. The line stays on this PC's clipboard.
     pub fn typeRunLine(self: *Pane, line: []const u8) SendError!void {
+        return self.typeRunLineThen(line, null);
+    }
+
+    /// `typeRunLine`, then, once Enter has gone, `clipboard_after` on the
+    /// clipboard (which the session shares): what the line's program reads
+    /// from it (Prepare server, `rdp_command_dialog.prepareLine`).
+    pub fn typeRunLineThen(self: *Pane, line: []const u8, clipboard_after: ?[]const u8) SendError!void {
         if (!self.isConnected()) return error.NotConnected;
         if (self.send_step != 0) return error.Busy;
+        if (self.clipboard_after) |text| self.alloc.free(text);
+        self.clipboard_after = null;
+        if (clipboard_after) |text| self.clipboard_after = std.unicode.utf8ToUtf16LeAlloc(self.alloc, text) catch return error.OutOfMemory;
         const wide = std.unicode.utf8ToUtf16LeAlloc(self.alloc, line) catch return error.OutOfMemory;
         defer self.alloc.free(wide);
         clipboard_write.write(.{}, self.hwnd, &.{clipboard_write.unicodeText(wide)}) catch return error.ClipboardUnavailable;
@@ -964,6 +1053,11 @@ pub const Pane = struct {
             },
             2 => {
                 if (!self.isConnected() or !self.sendKeys(&keys_enter)) return self.sendDone(.failed);
+                if (self.clipboard_after) |text| {
+                    self.clipboard_after = null;
+                    defer self.alloc.free(text);
+                    clipboard_write.write(.{}, self.hwnd, &.{clipboard_write.unicodeText(text)}) catch return self.sendDone(.failed);
+                }
                 self.sendDone(.run_line);
             },
             else => _ = KillTimer(window, send_timer),
@@ -983,6 +1077,11 @@ pub const Pane = struct {
         _ = KillTimer(self.hwnd, start_timer);
         _ = KillTimer(self.hwnd, send_timer);
         _ = KillTimer(self.hwnd, resize_timer);
+        if (self.clipboard_after) |text| self.alloc.free(text);
+        self.clipboard_after = null;
+        // A check still under way frees itself when it ends.
+        if (self.probe) |probe| probe.release();
+        self.probe = null;
         _ = RemovePropW(self.hwnd, prop_name);
         if (connectedState(self.control) != 0) _ = call(self.control, L("Disconnect"));
         _ = self.control.vtbl.Release(self.control);
@@ -1020,6 +1119,8 @@ pub const Pane = struct {
             self.seen_connecting = true;
             if (state == 1) {
                 self.reconnects = 0;
+                self.offline_polls = 0;
+                self.told_waiting = false;
                 if (!self.told_connected) {
                     self.told_connected = true;
                     noteEvent("pane={x} connected", .{@intFromPtr(self)});
@@ -1050,26 +1151,75 @@ pub const Pane = struct {
         // a session never under way gets a few polls first.
         if (!self.seen_connecting and self.ticks < 5) return;
         const reason = disconnectReason(self.control);
-        switch (afterDrop(self.told_connected, reason, self.reconnects, self.idle_polls)) {
-            .wait => {
-                self.idle_polls +|= 1;
-                return;
-            },
-            .reconnect => {
-                self.idle_polls = 0;
-                self.reconnects += 1;
-                log.info("rdp pane: reconnecting attempt={d} reason={d}", .{ self.reconnects, reason });
-                noteEvent("pane={x} dropped reason={d}, reconnect attempt={d}", .{ @intFromPtr(self), reason, self.reconnects });
-                self.connect();
-                return;
-            },
-            .end => {},
+        end: {
+            switch (afterDrop(self.told_connected, reason, self.reconnects, self.idle_polls)) {
+                .wait => {
+                    self.idle_polls +|= 1;
+                    return;
+                },
+                .reconnect => switch (self.networkReady()) {
+                    // The port does not answer yet: no sign-in is tried.
+                    .waiting => return,
+                    .gave_up => break :end,
+                    .ready => {
+                        self.idle_polls = 0;
+                        self.reconnects += 1;
+                        log.info("rdp pane: reconnecting attempt={d} reason={d}", .{ self.reconnects, reason });
+                        noteEvent("pane={x} dropped reason={d}, reconnect attempt={d}", .{ @intFromPtr(self), reason, self.reconnects });
+                        self.connect();
+                        return;
+                    },
+                },
+                .end => break :end,
+            }
         }
         log.info("rdp pane: session ended extended_reason={d} reconnects={d}", .{ reason, self.reconnects });
         noteEvent("pane={x} ended reason={d} was_connected={} reconnects={d}", .{ @intFromPtr(self), reason, self.told_connected, self.reconnects });
         const events = self.events;
         self.destroy();
         events.ended(events.ctx);
+    }
+
+    /// Before a dropped session signs in again: whether its server's port
+    /// answers (`Probe`), checked every `probe_every_polls` on a thread of
+    /// its own. A link that is down waits, up to `max_offline_polls`,
+    /// without a sign-in, so the reconnects (`max_reconnects`, each a
+    /// logon) are spent only on a server that can be reached.
+    fn networkReady(self: *Pane) enum { ready, waiting, gave_up } {
+        if (self.probe) |probe| switch (probe.result()) {
+            .checking => {
+                self.offline_polls +|= 1;
+                return if (self.offline_polls > max_offline_polls) .gave_up else .waiting;
+            },
+            .answered => {
+                probe.release();
+                self.probe = null;
+                if (self.told_waiting) noteEvent("pane={x} server answers again after {d} s", .{ @intFromPtr(self), self.offline_polls });
+                self.offline_polls = 0;
+                self.told_waiting = false;
+                return .ready;
+            },
+            .silent => {
+                probe.release();
+                self.probe = null;
+                if (!self.told_waiting) {
+                    self.told_waiting = true;
+                    noteEvent("pane={x} server does not answer: waiting for the network", .{@intFromPtr(self)});
+                    if (self.events.waiting) |waiting| waiting(self.events.ctx);
+                }
+            },
+        };
+        self.offline_polls +|= 1;
+        if (self.offline_polls > max_offline_polls) {
+            noteEvent("pane={x} gave up waiting for the network", .{@intFromPtr(self)});
+            return .gave_up;
+        }
+        // The first check at once; then one every few polls.
+        if (self.offline_polls == 1 or self.offline_polls % probe_every_polls == 0) {
+            // No thread for the check: sign in as before, without waiting.
+            self.probe = Probe.start(self.server, self.port) orelse return .ready;
+        }
+        return .waiting;
     }
 
     /// Why the session ended (`ExtendedDisconnectReason`, 0 when the

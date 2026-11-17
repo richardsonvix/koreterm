@@ -13,7 +13,7 @@ pub const ApplyPolicy = enum { live, new_terminals, restart };
 pub const PreviewEffect = enum { none, theme, opacity };
 /// `profile` is a dropdown whose items are the profiles the app lists
 /// (`AppHandle.profileChoices`), not a fixed `Combo`.
-pub const Kind = enum { integer, number, padding, boolean, choice, blur, notifications, font_families, theme, command, profile, directory };
+pub const Kind = enum { integer, number, padding, boolean, choice, blur, notifications, font_families, theme, command, profile, directory, folder };
 /// Platform availability drives native enablement and all reason labels.
 pub const Support = enum {
     available,
@@ -73,6 +73,7 @@ pub const SettingField = enum {
     rdp_compression,
     rdp_experience,
     rdp_trust_certificates,
+    tab_capture_quality,
 
     pub fn label(self: SettingField) []const u8 {
         if (projection(self)) |part| return part.label;
@@ -281,6 +282,8 @@ pub const descriptors = [_]Descriptor{
     .{ .key = .@"rdp-compression", .native = .{ .binding = "combo_rdp_compression", .id = 430, .order = 5, .form_label = "Remote Desktop compression", .accessible_name = "Remote Desktop compression" }, .field = .rdp_compression, .label = "Remote Desktop compression", .help = "Whether a Remote Desktop tab compresses what the server sends. A connection can set its own.", .section = .shell, .kind = .choice, .apply = .new_terminals, .keywords = "settings preferences configuration rdp-compression remote desktop compression stream bandwidth quality" },
     .{ .key = .@"rdp-experience", .native = .{ .binding = "combo_rdp_experience", .id = 431, .order = 6, .form_label = "Remote Desktop visual quality", .accessible_name = "Remote Desktop visual quality" }, .field = .rdp_experience, .label = "Remote Desktop visual quality", .help = "How much of the remote desktop's look to send: wallpaper, themes, animations and font smoothing. A connection can set its own.", .section = .shell, .kind = .choice, .apply = .new_terminals, .keywords = "settings preferences configuration rdp-experience remote desktop wallpaper themes animations font smoothing quality" },
     .{ .key = .@"rdp-trust-certificates", .native = .{ .binding = "combo_rdp_certificates", .id = 432, .order = 7, .form_label = "Remote Desktop unverified server", .accessible_name = "Remote Desktop unverified server" }, .field = .rdp_trust_certificates, .label = "Remote Desktop unverified server", .help = "Whether a Remote Desktop tab connects to a server whose certificate cannot be checked without asking, or shows Windows' warning. A connection can set its own.", .section = .shell, .kind = .choice, .apply = .new_terminals, .keywords = "settings preferences configuration rdp-trust-certificates remote desktop certificate warning trust identity" },
+    .{ .key = .@"tab-capture-folder", .native = .{ .binding = "edit_capture_folder", .id = 433, .order = 4, .form_label = "Snapshot and recording folder (blank = Downloads)", .accessible_name = "Snapshot and recording folder" }, .label = "Snapshot and recording folder", .help = "Where a tab's snapshot and recording (a tab's right-click menu) are saved. Leave it blank for your Downloads folder.", .placeholder = "Downloads", .section = .terminal, .kind = .folder, .apply = .live, .keywords = "settings preferences configuration tab-capture-folder snapshot screenshot recording video capture folder downloads", .default_display = .automatic },
+    .{ .key = .@"tab-capture-quality", .native = .{ .binding = "combo_capture_quality", .id = 434, .order = 5, .form_label = "Tab recording quality", .accessible_name = "Tab recording quality" }, .field = .tab_capture_quality, .label = "Tab recording quality", .help = "A tab's recording is an MP4 video. Low: 5 frames a second, at most 1280 pixels wide, the smallest files. Normal: 10 frames a second, at most 1920 wide. High: 20 frames a second, at most 2560 wide.", .section = .terminal, .kind = .choice, .apply = .live, .keywords = "settings preferences configuration tab-capture-quality recording video quality frames mp4 capture" },
 };
 
 pub const FormField = struct {
@@ -387,6 +390,7 @@ pub fn assertCoverage(comptime owned_keys: anytype) void {
             .command => T == ?Config.Command,
             .profile => T == ?[:0]const u8,
             .directory => T == ?Config.WorkingDirectory,
+            .folder => T == ?[:0]const u8,
         };
         if (!type_matches) @compileError("Settings editor kind differs from Config type: " ++ @tagName(spec.key));
         if (spec.label.len == 0 or spec.keywords.len == 0) @compileError("Settings metadata must be named");
@@ -543,6 +547,11 @@ pub fn Combo(comptime field: SettingField) type {
             .{ .value = true, .label = "Connect without asking" },
             .{ .value = false, .label = "Ask (Windows' warning)" },
         },
+        .tab_capture_quality => &.{
+            .{ .value = .low, .label = "Low (5 fps, small files)" },
+            .{ .value = .normal, .label = "Normal (10 fps)" },
+            .{ .value = .high, .label = "High (20 fps)" },
+        },
         else => @compileError("Not a Settings dropdown"),
     };
     comptime {
@@ -652,6 +661,7 @@ pub fn writeOwnedSettingValue(comptime key: Config.Key, writer: *std.Io.Writer, 
         } else try writer.writeAll("(automatic)"),
         .@"default-profile" => try writer.writeAll(config.@"default-profile" orelse "(automatic)"),
         .@"working-directory" => if (config.@"working-directory") |directory| try writeWorkingDirectoryForEdit(writer, directory) else try writer.writeAll("(home folder)"),
+        .@"tab-capture-folder" => try writer.writeAll(config.@"tab-capture-folder" orelse "(Downloads)"),
         else => @compileError("Not an owned Settings edit"),
     }
 }
@@ -729,6 +739,8 @@ pub const round_trip_config =
     \\rdp-compression = false
     \\rdp-experience = fast
     \\rdp-trust-certificates = false
+    \\tab-capture-folder = C:\Captures
+    \\tab-capture-quality = high
 ;
 /// Behavioral round trips use Config's real grammar and formatter, including
 /// composite/owned keys, rather than checking source text or pointer equality.

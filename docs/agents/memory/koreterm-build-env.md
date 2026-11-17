@@ -10,6 +10,7 @@ metadata:
 
 - Run `zig build` and the tests through `D:\Projetos\koreterm\scripts\dev-windows.cmd` with `ZIG_GLOBAL_CACHE_DIR=D:\Temp\zig-global-cache`. With the default cache on C:, the build runner panics in `Run.convertPathArg` (logged in `docs/agents/log/test-harnesses.md`, 2026-11-13).
 - A known test failure is not caused by any change: `TABGAP integrated host tabs reach the maximized top and restore exactly`.
+- Since `c5613d499` (2026-11-13, Profiles page) three `win32_settings` tests fail. The page's `btn_profile_sort`/`btn_profile_detected` and two of its texts are never made by `makeAllSections`. The failing tests: "settings fields, labels and help live in a viewport that clips them" (panic), "settings generated form labels immediately precede their controls" (panic), and "settings sections shown in any order leave the window as one made whole at open" (no UIA provider). Found 2026-11-17 and not fixed yet. Adding a Settings row also changes the window counts in "a first visit create each window once" (+2 per row) and "sections shown in any order".
 - The flagship contracts fail 6 inherited contracts.
 - The user's updates are the update.zip flow:
   1. `pwsh scripts\package-windows.ps1 -Version X`

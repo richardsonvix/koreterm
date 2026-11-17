@@ -4,7 +4,9 @@
 //! the config's) and its notes. Settings writes what it returns into the
 //! draft (the notes as the profile's `windows_shell.notes_env`, as every
 //! profile keeps them) and keeps the login apart from the config
-//! (`profile_credentials`).
+//! (`profile_credentials`), with the optional administrator login under
+//! its own id (`profile_credentials.adminId`), which the command window's
+//! Server buttons sign in with.
 //!
 //! Nothing here logs a value the person typed.
 const std = @import("std");
@@ -38,6 +40,14 @@ pub const Connection = struct {
     /// In only: a password is kept, so the field says leaving it blank
     /// keeps it.
     has_password: bool = false,
+    /// An administrator of the server, for what runs on it without its
+    /// screen (`rdp_command_dialog`); empty for none.
+    admin_user: []const u8 = "",
+    /// Out only: an administrator password typed in; null leaves the kept
+    /// one as it is.
+    admin_password: ?[]const u8 = null,
+    /// In only: an administrator password is kept.
+    has_admin_password: bool = false,
     options: terminals_import.RdpOptions = .{},
     /// Free text, any number of lines; empty for none.
     notes: []const u8 = "",
@@ -71,6 +81,9 @@ const id_password_note: u16 = 118;
 const id_certificates: u16 = 119;
 const id_notes: u16 = 120;
 const id_favorite: u16 = 121;
+const id_admin_user: u16 = 122;
+const id_admin_password: u16 = 123;
+const id_admin_note: u16 = 124;
 const BM_GETCHECK: UINT = 0x00F0;
 const BM_SETCHECK: UINT = 0x00F1;
 
@@ -160,11 +173,11 @@ fn buildTemplate(alloc: Allocator) Allocator.Error![]align(4) u8 {
     const combo: u16 = 0x0085;
 
     const w: i16 = 280;
-    const h: i16 = 278;
+    const h: i16 = 322;
     const label_w: i16 = 86;
     const field_x: i16 = 7 + label_w + 4;
     const field_w: i16 = w - field_x - 7;
-    const count: u16 = 9 * 2 + 1 + 2 + 2 + 1;
+    const count: u16 = item_count;
     try t.int(u32, 0x80000000 | 0x00C00000 | 0x00080000 | 0x80 | 0x40 | 0x800); // popup, caption, sysmenu, modal frame, setfont, center
     try t.int(u32, 0);
     try t.int(u16, count);
@@ -185,6 +198,8 @@ fn buildTemplate(alloc: Allocator) Allocator.Error![]align(4) u8 {
         .{ .label = L("P&ort"), .id = id_port, .kind = .number },
         .{ .label = L("&User name"), .id = id_user, .kind = .text },
         .{ .label = L("Pass&word"), .id = id_password, .kind = .password },
+        .{ .label = L("A&dmin user (optional)"), .id = id_admin_user, .kind = .text },
+        .{ .label = L("Admin password"), .id = id_admin_password, .kind = .password },
         .{ .label = L("&Colors"), .id = id_colors, .kind = .choice },
         .{ .label = L("Com&pression"), .id = id_compression, .kind = .choice },
         .{ .label = L("&Visual quality"), .id = id_experience, .kind = .choice },
@@ -208,6 +223,7 @@ fn buildTemplate(alloc: Allocator) Allocator.Error![]align(4) u8 {
     try t.item(child | WS_TABSTOP | WS_GROUP | 0x3, field_x, y + 56, field_w, 12, id_favorite, button, L("★ Favo&rite: listed in the new-tab menu"));
     // Under the password field: what leaving it blank does.
     try t.item(child, field_x, 9 + 18 * 4 + 14, field_w, 9, id_password_note, static, L(""));
+    try t.item(child, field_x, 9 + 18 * 4 + 26 + 18 + 14, field_w, 9, id_admin_note, static, L(""));
     try t.item(child | WS_TABSTOP | WS_GROUP | BS_DEFPUSHBUTTON, w - 7 - 50 - 4 - 50, h - 21, 50, 14, IDOK, button, L("OK"));
     try t.item(child | WS_TABSTOP, w - 7 - 50, h - 21, 50, 14, IDCANCEL, button, L("Cancel"));
 
@@ -215,6 +231,10 @@ fn buildTemplate(alloc: Allocator) Allocator.Error![]align(4) u8 {
     @memcpy(out, t.bytes.items);
     return out;
 }
+
+/// Eleven labelled rows, the notes' label and field, the favorite box, the
+/// two password notes, and OK and Cancel.
+const item_count: u16 = 11 * 2 + 2 + 1 + 2 + 2;
 
 fn stateOf(hwnd: HWND) ?*State {
     const raw = GetWindowLongPtrW(hwnd, DWLP_USER);
@@ -240,6 +260,17 @@ fn readText(hwnd: HWND, id: u16, alloc: Allocator) ?[]u8 {
     const copy = alloc.dupe(u8, trimmed) catch return null;
     alloc.free(text);
     return copy;
+}
+
+/// A password field's text, in `alloc`; null when it is empty. The wide
+/// copy is zeroed.
+fn readSecret(hwnd: HWND, id: u16, alloc: Allocator) ?[]const u8 {
+    const control = GetDlgItem(hwnd, id) orelse return null;
+    var buf: [512]u16 = undefined;
+    defer @memset(&buf, 0);
+    const len = GetWindowTextW(control, &buf, buf.len);
+    if (len <= 0) return null;
+    return std.unicode.utf16LeToUtf8Alloc(alloc, buf[0..@intCast(len)]) catch null;
 }
 
 fn fillCombo(hwnd: HWND, id: u16, labels: []const [:0]const u16, selected: usize) void {
@@ -278,6 +309,8 @@ fn dialogProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(.w
             setText(hwnd, id_port, a, std.fmt.bufPrint(&port_buf, "{d}", .{conn.port}) catch "3389");
             setText(hwnd, id_user, a, conn.user);
             setText(hwnd, id_password_note, a, if (conn.has_password) "Blank keeps the saved password." else "No password saved: Windows will ask.");
+            setText(hwnd, id_admin_user, a, conn.admin_user);
+            setText(hwnd, id_admin_note, a, if (conn.has_admin_password) "Blank keeps the saved one." else "For Server Status and restart (tab menu).");
             if (GetDlgItem(hwnd, id_port)) |port| _ = SendMessageW(port, EM_LIMITTEXT, 5, 0);
             fillCombo(hwnd, id_colors, &color_labels, indexOf(?terminals_import.ColorDepth, &color_values, conn.options.colors));
             fillCombo(hwnd, id_compression, &compression_labels, indexOf(?bool, &compression_values, conn.options.compression));
@@ -311,14 +344,9 @@ fn dialogProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(.w
                     }
                     const user = readText(hwnd, id_user, a) orelse return 1;
                     const notes = profile_dialog.readText(hwnd, id_notes, a) orelse return 1;
-                    const password_control = GetDlgItem(hwnd, id_password);
-                    var password: ?[]const u8 = null;
-                    if (password_control) |control| {
-                        var buf: [512]u16 = undefined;
-                        const len = GetWindowTextW(control, &buf, buf.len);
-                        if (len > 0) password = std.unicode.utf16LeToUtf8Alloc(a, buf[0..@intCast(len)]) catch null;
-                        @memset(&buf, 0);
-                    }
+                    const password = readSecret(hwnd, id_password, a);
+                    const admin_user = readText(hwnd, id_admin_user, a) orelse return 1;
+                    const admin_password = readSecret(hwnd, id_admin_password, a);
                     state.connection.* = .{
                         .name = name,
                         .server = server,
@@ -326,6 +354,9 @@ fn dialogProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(.w
                         .user = user,
                         .password = password,
                         .has_password = state.connection.has_password,
+                        .admin_user = admin_user,
+                        .admin_password = admin_password,
+                        .has_admin_password = state.connection.has_admin_password,
                         .options = .{
                             .colors = color_values[@min(comboIndex(hwnd, id_colors), color_values.len - 1)],
                             .compression = compression_values[@min(comboIndex(hwnd, id_compression), compression_values.len - 1)],
@@ -357,5 +388,5 @@ test "rdp connection dialog: the template is DWORD aligned and counts its items"
     const template = try buildTemplate(std.testing.allocator);
     defer std.testing.allocator.free(template);
     try std.testing.expectEqual(@as(usize, 0), @intFromPtr(template.ptr) % 4);
-    try std.testing.expectEqual(@as(u16, 9 * 2 + 1 + 2 + 2 + 1), std.mem.readInt(u16, template[8..10], .little));
+    try std.testing.expectEqual(item_count, std.mem.readInt(u16, template[8..10], .little));
 }

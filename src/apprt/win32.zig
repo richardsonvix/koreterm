@@ -441,6 +441,7 @@ test {
     _ = @import("win32/site_update.zig");
     _ = @import("win32/desktop_shortcuts.zig");
     _ = @import("win32/tab_style.zig");
+    _ = @import("win32/tab_capture.zig");
     _ = @import("win32/env_refresh.zig");
     _ = clipboard_write;
     _ = @import("win32_aumid.zig");

@@ -560,6 +560,7 @@ const OwnedSettingField = enum {
     /// waits in `owned_text_changed`.
     default_profile,
     working_directory,
+    tab_capture_folder,
 
     fn section(self: OwnedSettingField) Section {
         return nativeSection(self.descriptor().section);
@@ -575,6 +576,7 @@ const OwnedSettingField = enum {
             .command => .command,
             .default_profile => .@"default-profile",
             .working_directory => .@"working-directory",
+            .tab_capture_folder => .@"tab-capture-folder",
         }).?;
     }
 };
@@ -669,6 +671,9 @@ fn display_edit_command(self: *SettingsWindow) void {
 fn display_edit_working_dir(self: *SettingsWindow) void {
     if (!self.owned_text_changed[@intFromEnum(OwnedSettingField.working_directory)]) self.displayWorkingDirInEdit();
 }
+fn display_edit_capture_folder(self: *SettingsWindow) void {
+    if (!self.owned_text_changed[@intFromEnum(OwnedSettingField.tab_capture_folder)]) self.displayCaptureFolderInEdit();
+}
 /// A dropdown whose items are the field's curated `Combo` options.
 fn comboAdapter(comptime field: SettingField) FieldAdapter {
     const bound = struct {
@@ -749,6 +754,8 @@ const field_adapters = .{
     .combo_rdp_compression = comboAdapter(.rdp_compression),
     .combo_rdp_experience = comboAdapter(.rdp_experience),
     .combo_rdp_certificates = comboAdapter(.rdp_trust_certificates),
+    .edit_capture_folder = FieldAdapter{ .display = display_edit_capture_folder, .changed = ownedEditChanged(.tab_capture_folder, "edit_capture_folder"), .left = SettingsWindow.syncCaptureFolderFromEdit },
+    .combo_capture_quality = comboAdapter(.tab_capture_quality),
 };
 
 comptime {
@@ -789,16 +796,17 @@ comptime {
 /// The complete persistence allowlist. Effective config contains derived fields
 /// and expanded include/shader paths which the native form does not edit.
 pub const editable_keys = .{
-    Config.Key.@"scrollback-limit",       Config.Key.@"font-size",         Config.Key.@"background-opacity",
-    Config.Key.@"window-padding-x",       Config.Key.@"window-padding-y",  Config.Key.@"clipboard-trim-trailing-spaces",
-    Config.Key.@"desktop-notifications",  Config.Key.@"app-notifications", Config.Key.@"confirm-close-surface",
-    Config.Key.@"copy-on-select",         Config.Key.@"clipboard-read",    Config.Key.@"clipboard-write",
-    Config.Key.@"link-url",               Config.Key.@"link-previews",     Config.Key.@"window-theme",
-    Config.Key.@"shell-integration",      Config.Key.@"cursor-style",      Config.Key.@"background-blur",
-    Config.Key.@"window-padding-balance", Config.Key.@"auto-update",       Config.Key.@"auto-update-channel",
-    Config.Key.@"font-family",            Config.Key.theme,                Config.Key.command,
-    Config.Key.@"default-profile",        Config.Key.@"working-directory", Config.Key.@"rdp-color-depth",
-    Config.Key.@"rdp-compression",        Config.Key.@"rdp-experience",    Config.Key.@"rdp-trust-certificates",
+    Config.Key.@"scrollback-limit",       Config.Key.@"font-size",           Config.Key.@"background-opacity",
+    Config.Key.@"window-padding-x",       Config.Key.@"window-padding-y",    Config.Key.@"clipboard-trim-trailing-spaces",
+    Config.Key.@"desktop-notifications",  Config.Key.@"app-notifications",   Config.Key.@"confirm-close-surface",
+    Config.Key.@"copy-on-select",         Config.Key.@"clipboard-read",      Config.Key.@"clipboard-write",
+    Config.Key.@"link-url",               Config.Key.@"link-previews",       Config.Key.@"window-theme",
+    Config.Key.@"shell-integration",      Config.Key.@"cursor-style",        Config.Key.@"background-blur",
+    Config.Key.@"window-padding-balance", Config.Key.@"auto-update",         Config.Key.@"auto-update-channel",
+    Config.Key.@"font-family",            Config.Key.theme,                  Config.Key.command,
+    Config.Key.@"default-profile",        Config.Key.@"working-directory",   Config.Key.@"rdp-color-depth",
+    Config.Key.@"rdp-compression",        Config.Key.@"rdp-experience",      Config.Key.@"rdp-trust-certificates",
+    Config.Key.@"tab-capture-folder",     Config.Key.@"tab-capture-quality",
 };
 
 /// A control that goes with a number field and writes the field as typing
@@ -4177,6 +4185,7 @@ pub const SettingsWindow = struct {
             .command => self.displayCommandInEdit(),
             .default_profile => self.displayDefaultProfile(),
             .working_directory => self.displayWorkingDirInEdit(),
+            .tab_capture_folder => self.displayCaptureFolderInEdit(),
         }
     }
 
@@ -4186,6 +4195,7 @@ pub const SettingsWindow = struct {
             .theme => self.syncThemeFromEdit(),
             .command => self.syncCommandFromEdit(),
             .working_directory => self.syncWorkingDirFromEdit(),
+            .tab_capture_folder => self.syncCaptureFolderFromEdit(),
             // A choice is staged when it is made.
             .default_profile => {},
         }
@@ -6410,6 +6420,36 @@ pub const SettingsWindow = struct {
         self.trackOwnedEdit(.working_directory);
     }
 
+    /// The Snapshot and recording folder field: blank is unset (the
+    /// Downloads folder), else the folder as typed.
+    fn syncCaptureFolderFromEdit(self: *SettingsWindow) void {
+        if (self.suppress_edit_events or !self.owned_text_changed[@intFromEnum(OwnedSettingField.tab_capture_folder)]) return;
+        const p = &(self.pending orelse return);
+        const arena = p.*._arena.?.allocator();
+        const edit = self.fields.edit_capture_folder orelse return;
+        var text_buf: [edit_text_max_utf8]u8 = undefined;
+        const text = readEditUtf8(edit, &text_buf) orelse return;
+        const trimmed = std.mem.trim(u8, text, " \t\"");
+        if (trimmed.len == 0) {
+            p.*.@"tab-capture-folder" = null;
+            self.clearValidationError(edit);
+            self.trackOwnedEdit(.tab_capture_folder);
+            return;
+        }
+        if (std.mem.indexOfAny(u8, trimmed, "\r\n") != null)
+            return self.setValidationError(edit, "Snapshot and recording folder cannot hold a line break.");
+        p.*.@"tab-capture-folder" = arena.dupeZ(u8, trimmed) catch
+            return self.setValidationError(edit, "Snapshot and recording folder could not be kept.");
+        self.clearValidationError(edit);
+        self.trackOwnedEdit(.tab_capture_folder);
+    }
+
+    fn displayCaptureFolderInEdit(self: *SettingsWindow) void {
+        const edit = self.fields.edit_capture_folder orelse return;
+        const p = self.pending orelse return;
+        setEditText(edit, p.@"tab-capture-folder" orelse "", &self.suppress_edit_events);
+    }
+
     fn displayWorkingDirInEdit(self: *SettingsWindow) void {
         const edit = self.fields.edit_working_dir orelse return;
         const p = self.pending orelse return;
@@ -8263,6 +8303,9 @@ pub const SettingsWindow = struct {
         var conn: rdp_dialog.Connection = .{};
         var kept: ?profile_credentials.Entry = null;
         defer if (kept) |entry| entry.deinit(alloc);
+        // The administrator login, kept under its own id.
+        var kept_admin: ?profile_credentials.Entry = null;
+        defer if (kept_admin) |entry| entry.deinit(alloc);
         var id: ?[]const u8 = null;
         if (existing_id) |given| {
             const draft = if (self.pending) |*config| config else return;
@@ -8285,6 +8328,14 @@ pub const SettingsWindow = struct {
             if (kept) |entry| {
                 conn.user = entry.user;
                 conn.has_password = entry.password.len != 0;
+            }
+            var admin_buf: [128]u8 = undefined;
+            if (profile_credentials.adminId(&admin_buf, given)) |admin_id| {
+                kept_admin = profile_credentials.readEntry(alloc, admin_id) catch null;
+                if (kept_admin) |entry| {
+                    conn.admin_user = entry.user;
+                    conn.has_admin_password = entry.password.len != 0;
+                }
             }
         }
         const title = if (existing_id == null) std.unicode.utf8ToUtf16LeStringLiteral("New Remote Desktop connection") else std.unicode.utf8ToUtf16LeStringLiteral("Edit Remote Desktop connection");
@@ -8336,6 +8387,18 @@ pub const SettingsWindow = struct {
                 self.setProfileNote(.refused, "Error: the login could not be kept.", .{});
         }
         if (conn.password) |typed| @memset(@constCast(typed), 0);
+        // The administrator login: a blank user name forgets it.
+        var admin_buf: [128]u8 = undefined;
+        if (profile_credentials.adminId(&admin_buf, saved_id)) |admin_id| {
+            if (conn.admin_user.len == 0) {
+                if (kept_admin != null) profile_credentials.remove(admin_id);
+            } else if (conn.admin_password != null or kept_admin == null or !std.mem.eql(u8, kept_admin.?.user, conn.admin_user)) {
+                const admin_password: []const u8 = conn.admin_password orelse if (kept_admin) |entry| entry.password else "";
+                profile_credentials.store(admin_id, conn.admin_user, admin_password) catch
+                    self.setProfileNote(.refused, "Error: the administrator login could not be kept.", .{});
+            }
+        }
+        if (conn.admin_password) |typed| @memset(@constCast(typed), 0);
         const favorite_refused = self.setProfileFavorite(draft, std.fmt.allocPrint(a, "user:{s}", .{saved_id}) catch return self.profileChangeFailed(), conn.favorite);
         self.profileDraftChanged(settings_profiles.identity(.profile, saved_id, null));
         if (favorite_refused) |why| return self.setProfileNote(.refused, "The favorite was not changed. {s}", .{why});
@@ -11984,8 +12047,10 @@ test "settings open and a first visit create each window once in its final form"
             // Privacy, so each of its rows is moved in once, behind Appearance's.
             const visits = [_]struct { section: Section, windows: usize, moved: u16 }{
                 .{ .section = .privacy, .windows = 12, .moved = 0 },
-                // Its 7 windows and the scrollback limit's up-down.
-                .{ .section = .terminal, .windows = 8, .moved = 1 },
+                // Its 11 windows (the snapshot folder and the recording
+                // quality, with their labels, among them) and the scrollback
+                // limit's up-down.
+                .{ .section = .terminal, .windows = 12, .moved = 1 },
             };
             for (visits) |visit| {
                 errdefer std.debug.print("settings first visit to {s}\n", .{@tagName(visit.section)});
@@ -12021,7 +12086,7 @@ test "settings open and a first visit create each window once in its final form"
             // Every section shown: the whole form, the All settings list (its
             // page is shown last), and still one font build.
             for (std.enums.values(Section)) |section| settings.setActiveSection(section);
-            try std.testing.expectEqual(@as(usize, 87), Work.Tree.of(fixture.hwnd()).len);
+            try std.testing.expectEqual(@as(usize, 91), Work.Tree.of(fixture.hwnd()).len);
             try std.testing.expectEqual(@as(u32, 1), settings.font_builds);
             try std.testing.expectEqual(@as(u32, 0), settings.theme_applications);
         }
@@ -12089,7 +12154,7 @@ test "settings sections shown in any order leave the window as one made whole at
             // Every window in the same z-order, with the same styles, place,
             // client area, check, dropdown heights, text and font, and every
             // field and text with its UIA provider.
-            try std.testing.expectEqual(@as(usize, 86), states[0].len);
+            try std.testing.expectEqual(@as(usize, 90), states[0].len);
             try State.expectSame(&states[0], &states[1]);
             try std.testing.expectEqual(providers[0], providers[1]);
             for (providers[1]) |provided| try std.testing.expect(provided);
@@ -28602,6 +28667,7 @@ fn ownedSettingEql(a: *const Config, b: *const Config, field: OwnedSettingField)
         .command => optionalCommandEql(a.command, b.command),
         .default_profile => optionalStringEql(a.@"default-profile", b.@"default-profile"),
         .working_directory => optionalWorkingDirectoryEql(a.@"working-directory", b.@"working-directory"),
+        .tab_capture_folder => optionalStringEql(a.@"tab-capture-folder", b.@"tab-capture-folder"),
     };
 }
 
@@ -28613,6 +28679,7 @@ fn ownedSettingBlank(config: *const Config, field: OwnedSettingField) bool {
         .command => config.command == null,
         .default_profile => config.@"default-profile" == null,
         .working_directory => config.@"working-directory" == null,
+        .tab_capture_folder => config.@"tab-capture-folder" == null,
     };
 }
 
@@ -28637,6 +28704,7 @@ const OwnedSettingValue = union(OwnedSettingField) {
     command: @FieldType(Config, "command"),
     default_profile: @FieldType(Config, "default-profile"),
     working_directory: @FieldType(Config, "working-directory"),
+    tab_capture_folder: @FieldType(Config, "tab-capture-folder"),
 };
 
 /// `source`'s value of `field`, copied into `target`'s arena but not stored.
@@ -28648,6 +28716,7 @@ fn cloneOwnedSetting(target: *Config, source: *const Config, field: OwnedSetting
         .command => .{ .command = if (source.command) |*value| try value.clone(alloc) else null },
         .default_profile => .{ .default_profile = if (source.@"default-profile") |value| try alloc.dupeZ(u8, value) else null },
         .working_directory => .{ .working_directory = if (source.@"working-directory") |value| try value.clone(alloc) else null },
+        .tab_capture_folder => .{ .tab_capture_folder = if (source.@"tab-capture-folder") |value| try alloc.dupeZ(u8, value) else null },
     };
 }
 
@@ -28658,6 +28727,7 @@ fn storeOwnedSetting(target: *Config, value: OwnedSettingValue) void {
         .command => |v| target.command = v,
         .default_profile => |v| target.@"default-profile" = v,
         .working_directory => |v| target.@"working-directory" = v,
+        .tab_capture_folder => |v| target.@"tab-capture-folder" = v,
     }
 }
 

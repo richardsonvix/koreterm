@@ -148,6 +148,15 @@ pub fn readEntry(alloc: Allocator, id: []const u8) Allocator.Error!?Entry {
     return vaultReadEntry(alloc, id);
 }
 
+/// The id a profile's administrator login is kept under: `<id>.admin`, in
+/// `buf`. A Remote Desktop profile can keep one beside the login it signs in
+/// with, for what runs on the server without its screen (the command
+/// window's server buttons). Null when it does not fit.
+pub fn adminId(buf: []u8, id: []const u8) ?[]const u8 {
+    if (id.len == 0) return null;
+    return std.fmt.bufPrint(buf, "{s}.admin", .{id}) catch null;
+}
+
 /// Forget profile `id`'s login, if one is kept.
 pub fn remove(id: []const u8) void {
     if (xdg.portableModeActive()) return fileRemove(id);
@@ -249,6 +258,14 @@ test "profile credentials: the target is the lower-case id under koreterm's pref
     const expected = std.unicode.utf8ToUtf16LeStringLiteral("koreterm:profile:coletor-nf");
     try std.testing.expectEqualSlices(u16, expected, name);
     try std.testing.expect(target(&buf, "") == null);
+}
+
+test "profile credentials: the administrator login has its own id" {
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("cnd03.admin", adminId(&buf, "cnd03").?);
+    try std.testing.expect(adminId(&buf, "") == null);
+    var small: [4]u8 = undefined;
+    try std.testing.expect(adminId(&small, "cnd03") == null);
 }
 
 test "profile credentials: store, read and remove a password" {

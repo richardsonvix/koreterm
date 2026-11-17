@@ -1,3 +1,42 @@
+koreterm 1.3.149
+
+- A Remote Desktop tab whose connection drops waits for the network (up
+  to 30 minutes, checking the server's port, signing in nowhere) and
+  reconnects by itself once the server answers, instead of giving up
+  after two tries.
+- Reconnect in an ended Remote Desktop tab's right-click menu. Run Command
+  and Server Status work in that tab too.
+- Opening a profile in a new tab closes the tabs already open from it
+  (undo brings them back); a busy terminal, a split tab or a group stays.
+- Save Snapshot of Tab and Record Tab in every tab's right-click menu: a
+  PNG, or an MP4 video of the tab (terminal or Remote Desktop). A
+  recording tab is red, and Stop Recording is in its menu. Settings >
+  Terminal sets the folder (Downloads by default) and the recording
+  quality: low, normal or high.
+- Server Status in a Remote Desktop tab's right-click menu: CPU, memory,
+  disks, signed-in sessions (and whether Explorer runs in each), the
+  processes using the most memory and CPU, and stopped automatic
+  services, with problems listed first. It goes through the server's
+  management (WinRM, or WMI over DCOM), so it works when the remote
+  screen is black or frozen.
+- The Run Command window has Server buttons that work without the remote
+  screen: sign a user out (ending the session's programs when it stays),
+  restart Explorer in a user's session, and force a restart.
+- A Remote Desktop connection can keep an administrator login (Admin user
+  and Admin password) for these, and the Run Command window can keep the
+  one typed in it.
+- More, in the Run Command window: critical events of the last 48
+  hours, processes (and ending one), restarting a service, starting
+  stopped services, pending restart, a scheduled restart and cancelling
+  it, disconnecting a session, and the largest folders.
+- Prepare server (More): opens an administrator PowerShell in the
+  session that turns remote management on, open only to this PC's
+  address, so the Server buttons work on the day the screen does not.
+- Trust this server adds a server to this PC's WinRM TrustedHosts (asks
+  for administrator permission). WinRM over HTTPS is a checkbox.
+- A failed remote command no longer shows PowerShell's CLIXML records,
+  and says which of the server's ports answer.
+
 koreterm 1.3.148
 
 - Renaming a profile (Settings, or Edit Profile in a tab's menu) renames

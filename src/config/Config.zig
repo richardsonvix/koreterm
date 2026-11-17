@@ -1100,6 +1100,22 @@ palette: Palette = .{},
 /// A connection can set its own with `/experience:<value>`.
 @"rdp-experience": RdpExperience = .balanced,
 
+/// The folder a tab's snapshot (Save Snapshot of Tab, in a tab's right-click
+/// menu) and recording (Record Tab) are saved in. Blank, the default, saves
+/// them in your Downloads folder.
+@"tab-capture-folder": ?[:0]const u8 = null,
+
+/// The quality of a tab's recording (an MP4 video, H.264):
+///
+///   * `low` - 5 frames a second, at most 1280 pixels wide: the smallest
+///     files, enough to follow text.
+///   * `normal` - 10 frames a second, at most 1920 pixels wide.
+///   * `high` - 20 frames a second, at most 2560 pixels wide, at a higher
+///     bitrate.
+///
+/// A snapshot is a PNG at the tab's full size whatever this says.
+@"tab-capture-quality": TabCaptureQuality = .normal,
+
 /// The opacity level (opposite of transparency) of the background. A value of
 /// 1 is fully opaque and a value of 0 is fully transparent. A value less than 0
 /// or greater than 1 will be clamped to the nearest valid value.
@@ -7215,6 +7231,13 @@ pub const RdpExperience = enum {
     fast,
     balanced,
     rich,
+};
+
+/// Valid values for tab-capture-quality.
+pub const TabCaptureQuality = enum {
+    low,
+    normal,
+    high,
 };
 
 /// Valid values for custom-shader-animation

@@ -456,6 +456,16 @@ pub const CTX_TAB_RDP_DETACH: usize = 4036;
 pub const CTX_TAB_RDP_DOCK: usize = 4037;
 /// A tab opened from a profile: Edit Profile (`SettingsWindow.editProfileFromTab`).
 pub const CTX_TAB_EDIT_PROFILE: usize = 4038;
+/// A Remote Desktop tab's "Server Status..." (`rdp_command_dialog.zig`,
+/// started on its status).
+pub const CTX_TAB_RDP_STATUS: usize = 4039;
+/// Any tab's "Save Snapshot of Tab" and "Record Tab" / "Stop Recording"
+/// (`tab_capture.zig`).
+pub const CTX_TAB_SNAPSHOT: usize = 4040;
+pub const CTX_TAB_RECORD: usize = 4041;
+/// A Remote Desktop tab's "Reconnect", once its session has ended
+/// (`Surface.reconnectRdp`).
+pub const CTX_TAB_RDP_RECONNECT: usize = 4042;
 /// The new-tab menu's Remote Desktop > saved groups: CTX_RDP_SAVED_GROUP_BASE
 /// + the line's index in `rdp-groups.txt`.
 pub const CTX_RDP_SAVED_GROUP_BASE: usize = 4600;
