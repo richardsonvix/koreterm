@@ -4160,8 +4160,16 @@ pub const Surface = struct {
 
     /// The Remote Desktop target of this pane's launch (`rdp_pane.targetOf`),
     /// read from the profile's command line, or from the launch command's
-    /// words joined into `buf`. Null for any other launch.
+    /// words joined into `buf`. A session handed over from a group has no
+    /// such launch: its live pane's server and port name it, with the
+    /// options of the profile that names them (`liveRdpTarget`). Null for
+    /// any other pane.
     fn rdpTarget(self: *const Surface, buf: []u8) ?rdp_pane_mod.Target {
+        if (self.launchRdpTarget(buf)) |target| return target;
+        return self.liveRdpTarget();
+    }
+
+    fn launchRdpTarget(self: *const Surface, buf: []u8) ?rdp_pane_mod.Target {
         if (self.launch_user) |user| return rdp_pane_mod.targetOf(user.command_line);
         const command = self.launch_command orelse return null;
         return switch (command) {
@@ -4175,6 +4183,20 @@ pub const Surface = struct {
                 break :joined rdp_pane_mod.targetOf(writer.buffered());
             },
         };
+    }
+
+    /// The target of the session covering this pane: the profile's command
+    /// that names its server and port, or else the server, port and user
+    /// the session connects with.
+    fn liveRdpTarget(self: *const Surface) ?rdp_pane_mod.Target {
+        const pane = self.rdp_pane orelse return null;
+        if (pane.server.len == 0) return null;
+        for (self.app.config.@"profile-command".entries.items) |entry| {
+            if (entry.removed) continue;
+            const other = rdp_pane_mod.targetOf(entry.value) orelse continue;
+            if (other.port == pane.port and std.ascii.eqlIgnoreCase(other.server, pane.server)) return other;
+        }
+        return .{ .protocol = .rdp, .server = pane.server, .port = pane.port, .user = pane.user };
     }
 
     /// Cover the pane with a Remote Desktop session to `target`, signed in
