@@ -433,6 +433,7 @@ test {
     _ = @import("win32/rdp_clipboard.zig");
     _ = @import("win32/rdp_command_dialog.zig");
     _ = @import("win32/rdp_connection_dialog.zig");
+    _ = @import("win32/rdp_file.zig");
     _ = @import("win32/preset_dialog.zig");
     _ = @import("win32/rdp_group.zig");
     _ = @import("win32/profile_dialog.zig");

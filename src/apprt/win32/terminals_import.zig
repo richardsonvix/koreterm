@@ -316,6 +316,10 @@ pub const RdpOptions = struct {
     experience: ?Experience = null,
     /// `/certificates:trust|ask` (`rdp-trust-certificates`).
     trust_certificates: ?bool = null,
+    /// `/reconnect:persistent`: a session that drops keeps reconnecting, in
+    /// bursts of a few sign-ins with longer and longer pauses between them
+    /// (`rdp_pane.afterDrop`). Off: two tries, then the tab says it ended.
+    persistent_reconnect: bool = false,
 };
 
 /// The command line of an RDP connection: `mstsc.exe /v:<server>[:<port>]`
@@ -328,6 +332,7 @@ pub fn writeRdpCommand(writer: *std.Io.Writer, server: []const u8, port: u16, op
     if (options.compression) |on| try writer.print(" /compression:{s}", .{if (on) "on" else "off"});
     if (options.experience) |experience| try writer.print(" /experience:{t}", .{experience});
     if (options.trust_certificates) |trust| try writer.print(" /certificates:{s}", .{if (trust) "trust" else "ask"});
+    if (options.persistent_reconnect) try writer.writeAll(" /reconnect:persistent");
 }
 
 /// Whether `server` can go on a command line as a host (`safeHost`).
@@ -383,6 +388,10 @@ pub fn parseCommand(command: []const u8) ?Connection {
             if (optionValue(arg, "certificates")) |value| {
                 if (std.ascii.eqlIgnoreCase(value, "trust")) conn.rdp.trust_certificates = true;
                 if (std.ascii.eqlIgnoreCase(value, "ask")) conn.rdp.trust_certificates = false;
+                continue;
+            }
+            if (optionValue(arg, "reconnect")) |value| {
+                conn.rdp.persistent_reconnect = std.ascii.eqlIgnoreCase(value, "persistent");
                 continue;
             }
             if (optionValue(arg, "experience")) |value| {
@@ -459,6 +468,15 @@ fn escape(writer: *std.Io.Writer, text: []const u8) std.Io.Writer.Error!void {
         '\'' => try writer.writeAll("&apos;"),
         else => try writer.writeByte(byte),
     };
+}
+
+test "an RDP command line carries persistent reconnect only when on" {
+    var buf: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try writeRdpCommand(&writer, "srv", 3389, .{ .persistent_reconnect = true });
+    try std.testing.expectEqualStrings("mstsc.exe /v:srv /reconnect:persistent", writer.buffered());
+    try std.testing.expect(parseCommand(writer.buffered()).?.rdp.persistent_reconnect);
+    try std.testing.expect(!parseCommand("mstsc.exe /v:srv").?.rdp.persistent_reconnect);
 }
 
 test "an RDP command line carries the connection's own quality settings" {

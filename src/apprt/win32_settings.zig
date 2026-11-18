@@ -40,6 +40,7 @@ const settings_patch = @import("win32/settings_patch.zig");
 const terminals_import = @import("win32/terminals_import.zig");
 const terminals_dialog = @import("win32/terminals_import_dialog.zig");
 const profile_credentials = @import("win32/profile_credentials.zig");
+const rdp_file = @import("win32/rdp_file.zig");
 const rdp_dialog = @import("win32/rdp_connection_dialog.zig");
 const preset_dialog = @import("win32/preset_dialog.zig");
 const settings_backup = @import("win32/settings_backup.zig");
@@ -8907,6 +8908,48 @@ pub const SettingsWindow = struct {
         self.setProfileNote(.said, "Exported {d} profile(s) to a Terminals file, {d} with a password in plain text. Keep the file somewhere safe.", .{ exported.count, exported.with_password });
     }
 
+    /// The list menu's "Export to Remote Desktop file (.rdp)..." on a Remote
+    /// Desktop profile: its connection as written in the draft, with the
+    /// user name the Credential Manager keeps for it and the config's
+    /// quality settings for what it leaves at default, as a `.rdp` file
+    /// where the person picks (`rdp_file`). The password stays out.
+    fn profileExportRdp(self: *SettingsWindow, id_in: []const u8) void {
+        if (!self.profileEditDone()) return;
+        const alloc = self.handle.alloc;
+        var arena: std.heap.ArenaAllocator = .init(alloc);
+        defer arena.deinit();
+        const a = arena.allocator();
+        // A copy: the dialog's loop may let a reload replace the draft.
+        const id = a.dupe(u8, id_in) catch return self.profileChangeFailed();
+        const config: *const Config = if (self.pending) |*draft| draft else self.handle.currentConfig(self.handle.ctx);
+        const command = config.@"profile-command".get(id) orelse return;
+        const parsed = terminals_import.parseCommand(command) orelse return;
+        if (parsed.protocol != .rdp) return;
+        var connection = parsed;
+        connection.server = a.dupe(u8, parsed.server) catch return self.profileChangeFailed();
+        var user: []const u8 = parsed.user;
+        if (profile_credentials.readEntry(a, id) catch null) |kept| {
+            @memset(kept.password, 0);
+            if (kept.user.len != 0) user = kept.user;
+        }
+        const name = a.dupe(u8, config.@"profile-name".get(id) orelse id) catch return self.profileChangeFailed();
+        const bytes = rdp_file.encode(a, connection, user, rdp_file.Defaults.of(config)) catch return self.profileChangeFailed();
+        var name_buf: [128]u16 = undefined;
+        const default_name = rdp_file.fileName(&name_buf, name, connection.server);
+        const path_buf = a.alloc(u16, 32768) catch return self.profileChangeFailed();
+        const path = terminals_dialog.pickSaveFile(
+            self.hwnd,
+            path_buf,
+            std.unicode.utf8ToUtf16LeStringLiteral("Export to a Remote Desktop file"),
+            std.unicode.utf8ToUtf16LeStringLiteral("Remote Desktop file (*.rdp)\x00*.rdp\x00All files (*.*)\x00*.*\x00"),
+            std.unicode.utf8ToUtf16LeStringLiteral("rdp"),
+            default_name,
+        ) orelse return;
+        writeWholeFile(path, bytes) catch
+            return self.setProfileNote(.refused, "Error: the Remote Desktop file could not be written.", .{});
+        self.setProfileNote(.said, "Exported the connection to a Remote Desktop file. It holds no password: Remote Desktop asks for it when the file is opened.", .{});
+    }
+
     /// The list menu's (and the window menu's) Back up all settings: one ZIP
     /// where the person picks, of koreterm's config and state folders (in
     /// portable mode, the data files beside the executable, logins
@@ -9782,6 +9825,10 @@ pub const SettingsWindow = struct {
                 else
                     std.unicode.utf8ToUtf16LeStringLiteral("&Delete profile..."));
         };
+        // A Remote Desktop connection as a file mstsc.exe opens.
+        if (self.profile_model.profileOf(row)) |profile| if (row.kind != .new_profile and !profile.found_hidden and self.profileIsRdp(profile.id)) {
+            _ = sys.AppendMenuW(menu, MF_STRING, profile_menu_export_rdp, std.unicode.utf8ToUtf16LeStringLiteral("Export to Remote Desktop &file (.rdp)..."));
+        };
         _ = sys.AppendMenuW(menu, MF_STRING | @as(UINT, if (self.draftTakesEdits()) 0 else MF_GRAYED), profile_menu_new_rdp, std.unicode.utf8ToUtf16LeStringLiteral("New &Remote Desktop connection..."));
         _ = sys.AppendMenuW(menu, MF_STRING | @as(UINT, if (self.draftTakesEdits()) 0 else MF_GRAYED), profile_menu_import, std.unicode.utf8ToUtf16LeStringLiteral("&Import from Terminals...\tCtrl+I"));
         _ = sys.AppendMenuW(menu, MF_STRING, profile_menu_export, std.unicode.utf8ToUtf16LeStringLiteral("E&xport to Terminals file (with passwords)..."));
@@ -9806,6 +9853,7 @@ pub const SettingsWindow = struct {
             profile_menu_based => self.profileEditWindow(null, row.profile, null),
             profile_menu_delete => self.profileDeleteFromMenu(),
             profile_menu_export => self.profileExportTerminals(),
+            profile_menu_export_rdp => if (self.profile_model.profileOf(row)) |profile| self.profileExportRdp(profile.id),
             profile_menu_backup => self.backupAllSettings(),
             reference_menu_open => self.handle.openInEditor(self.handle.ctx),
             else => {},
@@ -22620,6 +22668,7 @@ const profile_menu_delete: usize = 14;
 const profile_menu_sort: usize = 15;
 const profile_menu_mine: usize = 16;
 const profile_menu_favorite: usize = 17;
+const profile_menu_export_rdp: usize = 18;
 /// What the Profiles list's UIA help text says: the keys it takes.
 const profile_list_help = "Up and Down move through the profiles, in the picker's order, and your profiles' fields: command line, name, starting folder and variables. " ++
     "Enter edits the selected field, Delete removes it (a profile asks twice), Insert or Ctrl+N adds a profile, Ctrl+I imports profiles from a Terminals export, Alt+Up and Alt+Down move a profile, Ctrl+H hides it or shows it, and Shift+F10 offers these. " ++

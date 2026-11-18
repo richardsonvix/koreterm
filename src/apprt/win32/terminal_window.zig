@@ -173,6 +173,8 @@ const rdp_group_mod = @import("rdp_group.zig");
 const rdp_command_dialog = @import("rdp_command_dialog.zig");
 const tab_capture = @import("tab_capture.zig");
 const profile_credentials = @import("profile_credentials.zig");
+const rdp_file = @import("rdp_file.zig");
+const terminals_dialog = @import("terminals_import_dialog.zig");
 const writeImeWindowFormsTrace = win32.writeImeWindowFormsTrace;
 
 // Test dependencies.
@@ -4228,6 +4230,7 @@ pub const Surface = struct {
                 .fill => .fill,
             },
             .trust_certificates = own.trust_certificates orelse config.@"rdp-trust-certificates",
+            .persistent_reconnect = own.persistent_reconnect,
         };
     }
 
@@ -4235,6 +4238,7 @@ pub const Surface = struct {
         return .{
             .ctx = self,
             .ended = &rdpEnded,
+            .paused = &rdpPaused,
             .released = &rdpReleased,
             .connected = &rdpConnected,
             .sent = &rdpSent,
@@ -4249,6 +4253,11 @@ pub const Surface = struct {
         pane.reparent(hwnd, self.rdpEvents());
         pane.setInteractive(true);
         self.rdp_pane = pane;
+        // The profile the session was opened from, so splits, Edit Profile
+        // and session restore find it as for a tab opened from the profile.
+        if (self.launch_profile_key == null) if (pane.profile_id) |id| {
+            self.launch_profile_key = std.fmt.allocPrintSentinel(self.app.core_app.alloc, "user:{s}", .{id}, 0) catch null;
+        };
         if (label.len != 0) self.setTabTitleOverride(label) catch |err| log.warn("rdp tab title failed err={}", .{err});
         var rect: RECT = undefined;
         if (sys.GetClientRect(hwnd, &rect) != 0) pane.resize(rect.right, rect.bottom);
@@ -4303,7 +4312,7 @@ pub const Surface = struct {
         };
         group.colors = start.colors;
         // Opened from its saved line: a rename moves that line.
-        if (start.name != null and start.saved_ids.len != 0) {
+        if (start.from_saved_line and start.name != null and start.saved_ids.len != 0) {
             group.setSavedAs(group.name) catch {};
         }
         self.rdp_group = group;
@@ -4447,6 +4456,15 @@ pub const Surface = struct {
         self.showRdpNotice("The Remote Desktop session ended. Right-click the tab and pick Reconnect, or open the profile again.");
     }
 
+    /// A keep-reconnecting session spent a burst of sign-ins: say when the
+    /// next one is, and that Reconnect does it now.
+    fn rdpPaused(ctx: *anyopaque, minutes: u32) void {
+        const self: *Surface = @ptrCast(@alignCast(ctx));
+        var buf: [256]u8 = undefined;
+        const message = std.fmt.bufPrint(&buf, "Remote Desktop: the reconnects did not get through (a changed password, or the server is not ready). The next try is in {d} minutes; Reconnect in the tab's menu tries now.", .{minutes}) catch return;
+        self.showRdpNotice(message);
+    }
+
     /// The session dropped and its server does not answer: the pane waits
     /// for the network before it signs in again (`Pane.networkReady`).
     fn rdpWaiting(ctx: *anyopaque) void {
@@ -4458,7 +4476,14 @@ pub const Surface = struct {
     /// session ended, with the config as it is now (an edited connection
     /// takes its new settings and login).
     pub fn reconnectRdp(self: *Surface) void {
-        if (self.rdp_pane != null) return self.showRdpNotice("The Remote Desktop session is still open.");
+        if (self.rdp_pane) |pane| {
+            // A keep-reconnecting pane between bursts tries now.
+            if (pane.isPaused()) {
+                pane.reconnectNow();
+                return self.showRdpNotice("Reconnecting the Remote Desktop session...");
+            }
+            return self.showRdpNotice("The Remote Desktop session is still open.");
+        }
         var buf: [1024]u8 = undefined;
         const target = self.rdpTarget(&buf) orelse
             return self.showRdpNotice("This tab cannot reconnect by itself: open the profile again.");
@@ -4575,6 +4600,57 @@ pub const Surface = struct {
                 self.showRdpNotice("Preparing the server: on the remote screen, Windows asks for administrator permission; click Yes. A PowerShell window then sets it up and says when it is done.");
             },
         }
+    }
+
+    /// The tab menu's "Export to Remote Desktop File (.rdp)...": the tab's
+    /// connection, with the user name its profile keeps and the config's
+    /// quality settings for what the connection leaves at default, as a
+    /// `.rdp` file where the person picks (`rdp_file`). The password stays
+    /// out: mstsc.exe asks for it. Nothing typed is logged.
+    pub fn exportRdpFile(self: *Surface) void {
+        const alloc = self.app.core_app.alloc;
+        var arena: std.heap.ArenaAllocator = .init(alloc);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var target_buf: [1024]u8 = undefined;
+        const found = self.rdpTarget(&target_buf) orelse
+            return self.showRdpNotice("This tab has no Remote Desktop connection to export.");
+        var target = found;
+        target.server = a.dupe(u8, found.server) catch return;
+        // The profile that names the server, for its name and its login.
+        const config = &self.app.config;
+        var name: []const u8 = self.effectiveTitle() orelse "";
+        var user: []const u8 = found.user;
+        for (config.@"profile-command".entries.items) |entry| {
+            if (entry.removed) continue;
+            const other = rdp_pane_mod.targetOf(entry.value) orelse continue;
+            if (other.port != target.port or !std.ascii.eqlIgnoreCase(other.server, target.server)) continue;
+            if (config.@"profile-name".get(entry.id)) |profile_name| name = profile_name;
+            if (profile_credentials.readEntry(a, entry.id) catch null) |kept| {
+                @memset(kept.password, 0);
+                if (kept.user.len != 0) user = kept.user;
+            }
+            break;
+        }
+        name = a.dupe(u8, name) catch return;
+        user = a.dupe(u8, user) catch return;
+        const bytes = rdp_file.encode(a, target, user, rdp_file.Defaults.of(config)) catch return;
+        var name_buf: [128]u16 = undefined;
+        const default_name = rdp_file.fileName(&name_buf, name, target.server);
+        const path_buf = a.alloc(u16, 32768) catch return;
+        const path = terminals_dialog.pickSaveFile(
+            self.windowHwnd(),
+            path_buf,
+            std.unicode.utf8ToUtf16LeStringLiteral("Export to a Remote Desktop file"),
+            std.unicode.utf8ToUtf16LeStringLiteral("Remote Desktop file (*.rdp)\x00*.rdp\x00All files (*.*)\x00*.*\x00"),
+            std.unicode.utf8ToUtf16LeStringLiteral("rdp"),
+            default_name,
+        ) orelse return;
+        rdp_file.writeFile(a, path, bytes) catch |err| {
+            log.warn("rdp file export failed err={}", .{err});
+            return self.showRdpNotice("The Remote Desktop file could not be written.");
+        };
+        self.showRdpNotice("Exported the connection to a Remote Desktop file. It holds no password: Remote Desktop asks for it when the file is opened.");
     }
 
     // --- Snapshot and recording of the tab (`tab_capture`) ---------------

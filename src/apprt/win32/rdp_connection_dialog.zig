@@ -84,6 +84,7 @@ const id_favorite: u16 = 121;
 const id_admin_user: u16 = 122;
 const id_admin_password: u16 = 123;
 const id_admin_note: u16 = 124;
+const id_persistent: u16 = 125;
 const BM_GETCHECK: UINT = 0x00F0;
 const BM_SETCHECK: UINT = 0x00F1;
 
@@ -173,7 +174,7 @@ fn buildTemplate(alloc: Allocator) Allocator.Error![]align(4) u8 {
     const combo: u16 = 0x0085;
 
     const w: i16 = 280;
-    const h: i16 = 322;
+    const h: i16 = 338;
     const label_w: i16 = 86;
     const field_x: i16 = 7 + label_w + 4;
     const field_w: i16 = w - field_x - 7;
@@ -221,6 +222,7 @@ fn buildTemplate(alloc: Allocator) Allocator.Error![]align(4) u8 {
     try t.item(child, 7, y + 2, label_w, 9, 0xFFFF, static, L("No&tes"));
     try t.item(child | WS_TABSTOP | WS_GROUP | WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN, field_x, y, field_w, 52, id_notes, edit_atom, L(""));
     try t.item(child | WS_TABSTOP | WS_GROUP | 0x3, field_x, y + 56, field_w, 12, id_favorite, button, L("★ Favo&rite: listed in the new-tab menu"));
+    try t.item(child | WS_TABSTOP | WS_GROUP | 0x3, field_x, y + 71, field_w, 12, id_persistent, button, L("&Keep reconnecting if the connection drops"));
     // Under the password field: what leaving it blank does.
     try t.item(child, field_x, 9 + 18 * 4 + 14, field_w, 9, id_password_note, static, L(""));
     try t.item(child, field_x, 9 + 18 * 4 + 26 + 18 + 14, field_w, 9, id_admin_note, static, L(""));
@@ -232,9 +234,9 @@ fn buildTemplate(alloc: Allocator) Allocator.Error![]align(4) u8 {
     return out;
 }
 
-/// Eleven labelled rows, the notes' label and field, the favorite box, the
-/// two password notes, and OK and Cancel.
-const item_count: u16 = 11 * 2 + 2 + 1 + 2 + 2;
+/// Eleven labelled rows, the notes' label and field, the favorite and
+/// keep-reconnecting boxes, the two password notes, and OK and Cancel.
+const item_count: u16 = 11 * 2 + 2 + 2 + 2 + 2;
 
 fn stateOf(hwnd: HWND) ?*State {
     const raw = GetWindowLongPtrW(hwnd, DWLP_USER);
@@ -318,6 +320,7 @@ fn dialogProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(.w
             fillCombo(hwnd, id_certificates, &certificate_labels, indexOf(?bool, &certificate_values, conn.options.trust_certificates));
             profile_dialog.setText(hwnd, id_notes, a, conn.notes);
             if (GetDlgItem(hwnd, id_favorite)) |box| _ = SendMessageW(box, BM_SETCHECK, @intFromBool(conn.favorite), 0);
+            if (GetDlgItem(hwnd, id_persistent)) |box| _ = SendMessageW(box, BM_SETCHECK, @intFromBool(conn.options.persistent_reconnect), 0);
             return 1;
         },
         WM_COMMAND => {
@@ -362,6 +365,7 @@ fn dialogProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(.w
                             .compression = compression_values[@min(comboIndex(hwnd, id_compression), compression_values.len - 1)],
                             .experience = experience_values[@min(comboIndex(hwnd, id_experience), experience_values.len - 1)],
                             .trust_certificates = certificate_values[@min(comboIndex(hwnd, id_certificates), certificate_values.len - 1)],
+                            .persistent_reconnect = if (GetDlgItem(hwnd, id_persistent)) |box| SendMessageW(box, BM_GETCHECK, 0, 0) == 1 else false,
                         },
                         .notes = notes,
                         .favorite = if (GetDlgItem(hwnd, id_favorite)) |box| SendMessageW(box, BM_GETCHECK, 0, 0) == 1 else false,

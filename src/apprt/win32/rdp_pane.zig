@@ -391,6 +391,9 @@ pub const Events = struct {
     /// The session dropped and the server's port does not answer: the pane
     /// waits for the network before it signs in again.
     waiting: ?*const fn (ctx: *anyopaque) void = null,
+    /// A pane that keeps reconnecting (`Options.persistent_reconnect`)
+    /// spent a burst of sign-ins: the next one is `minutes` away.
+    paused: ?*const fn (ctx: *anyopaque, minutes: u32) void = null,
 };
 
 /// What `Pane.typeRunLine` came to. Keys reaching the session are all that
@@ -451,6 +454,12 @@ pub const Options = struct {
     /// The remote computer's sound plays here. Off in a group's grid
     /// (`rdp_group.zig`), where it is only watched.
     audio: bool = true,
+    /// A session that drops keeps reconnecting: bursts of
+    /// `persistent_burst` sign-ins, then longer and longer pauses
+    /// (`persistent_pause_minutes`); one sign-in a burst once a whole burst
+    /// was refused with the server answering (a changed password). Off:
+    /// `max_reconnects`, then the tab says it ended.
+    persistent_reconnect: bool = false,
 
     /// Whether `other` needs the session to connect again to take effect:
     /// what the control reads only when it connects.
@@ -554,15 +563,82 @@ const Probe = struct {
     }
 };
 
-const Drop = enum { wait, reconnect, end };
+/// A keep-reconnecting pane's sign-ins in a row before it pauses
+/// (`Options.persistent_reconnect`).
+const persistent_burst: u32 = 3;
+/// Its pauses after each spent burst, in minutes; the last repeats. At
+/// most `persistent_burst` failed logons per pause, so a changed password
+/// stays well under a lockout threshold (Windows' default: 10 in 10
+/// minutes); after a refused burst, one per pause.
+const persistent_pause_minutes = [_]u32{ 5, 15, 30, 60 };
+/// Polls before the one automatic retry of a first connection that never
+/// came up (`first_retry`).
+const first_retry_delay_polls: u32 = 3;
 
-/// What the poll does once the control reports no connection. A session
-/// that never connected is not retried (its login failed, or the server is
-/// wrong), nor one the server or the person ended (`reason` other than 0).
-fn afterDrop(was_connected: bool, reason: i32, reconnects: u32, idle_polls: u32) Drop {
-    if (!was_connected or reason != 0) return .end;
-    if (reconnects >= max_reconnects) return .end;
-    if (idle_polls < reconnect_delay_polls) return .wait;
+/// `ExtendedDisconnectReason` values no reconnect can mend: the session was
+/// ended on purpose (1 and 2 by this app, 12 the user signed out), taken by
+/// another connection (5: reconnecting would take it back), refused for the
+/// account (9 insufficient privileges, 10 fresh credentials required), or
+/// refused a license (256 to 4095).
+fn endsForGood(reason: i32) bool {
+    return switch (reason) {
+        1, 2, 5, 9, 10, 12 => true,
+        256...4095 => true,
+        else => false,
+    };
+}
+
+fn pauseMinutes(pauses: u32) u32 {
+    return persistent_pause_minutes[@min(pauses, persistent_pause_minutes.len - 1)];
+}
+
+const Drop = enum { wait, reconnect, pause, end };
+
+/// Where a pane stands when the control reports no connection.
+const DropState = struct {
+    /// The session connected at least once.
+    was_connected: bool,
+    /// `ExtendedDisconnectReason` (0 nothing known, as for a dropped link;
+    /// -1 unread).
+    reason: i32,
+    /// Sign-ins since the last connection (or the last pause).
+    reconnects: u32,
+    /// Polls since the drop or the last sign-in.
+    idle_polls: u32,
+    persistent: bool = false,
+    /// Attempts in a row that ended unconnected with the server answering.
+    refused: u32 = 0,
+    /// The one automatic retry of a first connection was spent.
+    first_retry_done: bool = true,
+};
+
+/// What the poll does once the control reports no connection.
+///
+/// A first connection that never came up gets one retry a few seconds
+/// later (a server or link still waking up), unless its reason says it
+/// cannot work: a wrong password costs two failed logons, as a manual
+/// retry would. After that it is not retried.
+///
+/// A dropped session: by default `max_reconnects` sign-ins for a drop
+/// with no reason (a lost link), none for one the server or the person
+/// ended. A keep-reconnecting pane (`persistent`) retries any drop but
+/// `endsForGood`'s, in bursts (`persistent_burst`, or 1 once a burst was
+/// refused) with a `pause` between them.
+fn afterDrop(state: DropState) Drop {
+    if (!state.was_connected) {
+        if (state.first_retry_done or endsForGood(state.reason)) return .end;
+        if (state.idle_polls < first_retry_delay_polls) return .wait;
+        return .reconnect;
+    }
+    if (state.persistent) {
+        if (endsForGood(state.reason)) return .end;
+        const burst: u32 = if (state.refused >= persistent_burst) 1 else persistent_burst;
+        if (state.reconnects >= burst) return .pause;
+    } else {
+        if (state.reason != 0) return .end;
+        if (state.reconnects >= max_reconnects) return .end;
+    }
+    if (state.idle_polls < reconnect_delay_polls) return .wait;
     return .reconnect;
 }
 
@@ -628,6 +704,21 @@ pub const Pane = struct {
     /// The session is being connected again to take new options
     /// (`applyOptions`): the poll connects it, not ends it.
     options_reconnect: bool = false,
+    /// A first connection that never came up was retried once
+    /// (`afterDrop`). Set for a pane with no kept password: its retry would
+    /// ask again.
+    first_retry_done: bool = false,
+    /// A sign-in is under way and has not connected yet: it counts as
+    /// refused when the session is found unconnected (`refused`).
+    attempt_open: bool = false,
+    /// Sign-ins in a row that ended unconnected after the server's port
+    /// answered: likely a refused login. A keep-reconnecting pane then tries
+    /// once a pause.
+    refused: u32 = 0,
+    /// A keep-reconnecting pane's pause: polls left, and how many pauses
+    /// since it last connected (each longer, `pauseMinutes`).
+    pause_left: u32 = 0,
+    pauses: u32 = 0,
 
     const prop_name = L("koreterm.rdp_pane");
     const poll_timer: usize = 0x5244; // "RD"
@@ -793,6 +884,8 @@ pub const Pane = struct {
         if (self.started) return;
         self.started = true;
         if (self.password == null) self.askCredentials();
+        // Without a kept password a retry would ask again.
+        if (self.password == null) self.first_retry_done = true;
         self.connect();
         _ = SetTimer(self.hwnd, poll_timer, 1000, &tick);
     }
@@ -931,6 +1024,22 @@ pub const Pane = struct {
     /// watched (a group's grid); the control still draws.
     pub fn setInteractive(self: *Pane, on: bool) void {
         _ = EnableWindow(self.hwnd, @intFromBool(on));
+    }
+
+    /// A keep-reconnecting pane waiting out a pause between bursts of
+    /// sign-ins (`Options.persistent_reconnect`).
+    pub fn isPaused(self: *const Pane) bool {
+        return self.pause_left != 0;
+    }
+
+    /// The tab menu's Reconnect during a pause: the next sign-in now, with
+    /// a new burst.
+    pub fn reconnectNow(self: *Pane) void {
+        if (self.pause_left == 0) return;
+        self.pause_left = 0;
+        self.reconnects = 0;
+        self.idle_polls = reconnect_delay_polls;
+        noteEvent("pane={x} reconnect asked during a pause", .{@intFromPtr(self)});
     }
 
     /// Take `options`. What the control reads only when it connects
@@ -1121,6 +1230,11 @@ pub const Pane = struct {
                 self.reconnects = 0;
                 self.offline_polls = 0;
                 self.told_waiting = false;
+                self.attempt_open = false;
+                self.refused = 0;
+                self.pauses = 0;
+                self.pause_left = 0;
+                self.first_retry_done = true;
                 if (!self.told_connected) {
                     self.told_connected = true;
                     noteEvent("pane={x} connected", .{@intFromPtr(self)});
@@ -1150,25 +1264,67 @@ pub const Pane = struct {
         // Not connected. A bad server name fails before Connect returns, so
         // a session never under way gets a few polls first.
         if (!self.seen_connecting and self.ticks < 5) return;
+        // A sign-in that ended without connecting.
+        if (self.attempt_open) {
+            self.attempt_open = false;
+            self.refused +|= 1;
+        }
+        // A keep-reconnecting pane between bursts.
+        if (self.pause_left != 0) {
+            self.pause_left -= 1;
+            return;
+        }
         const reason = disconnectReason(self.control);
         end: {
-            switch (afterDrop(self.told_connected, reason, self.reconnects, self.idle_polls)) {
+            switch (afterDrop(.{
+                .was_connected = self.told_connected,
+                .reason = reason,
+                .reconnects = self.reconnects,
+                .idle_polls = self.idle_polls,
+                .persistent = self.options.persistent_reconnect,
+                .refused = self.refused,
+                .first_retry_done = self.first_retry_done,
+            })) {
                 .wait => {
                     self.idle_polls +|= 1;
                     return;
                 },
-                .reconnect => switch (self.networkReady()) {
-                    // The port does not answer yet: no sign-in is tried.
-                    .waiting => return,
-                    .gave_up => break :end,
-                    .ready => {
+                .pause => {
+                    const minutes = pauseMinutes(self.pauses);
+                    self.pause_left = minutes * 60;
+                    self.pauses +|= 1;
+                    self.reconnects = 0;
+                    self.idle_polls = 0;
+                    log.info("rdp pane: reconnects spent, pausing minutes={d} refused={d}", .{ minutes, self.refused });
+                    noteEvent("pane={x} reconnects spent (refused={d}): next try in {d} min", .{ @intFromPtr(self), self.refused, minutes });
+                    if (self.events.paused) |paused| paused(self.events.ctx, minutes);
+                    return;
+                },
+                .reconnect => {
+                    if (!self.told_connected) {
+                        // The one retry of a first connection: no wait for
+                        // the network, which the first try just reached.
+                        self.first_retry_done = true;
                         self.idle_polls = 0;
-                        self.reconnects += 1;
-                        log.info("rdp pane: reconnecting attempt={d} reason={d}", .{ self.reconnects, reason });
-                        noteEvent("pane={x} dropped reason={d}, reconnect attempt={d}", .{ @intFromPtr(self), reason, self.reconnects });
+                        log.info("rdp pane: first connection failed reason={d}, retrying once", .{reason});
+                        noteEvent("pane={x} first connection failed reason={d}, retrying once", .{ @intFromPtr(self), reason });
                         self.connect();
                         return;
-                    },
+                    }
+                    switch (self.networkReady()) {
+                        // The port does not answer yet: no sign-in is tried.
+                        .waiting => return,
+                        .gave_up => break :end,
+                        .ready => {
+                            self.idle_polls = 0;
+                            self.reconnects += 1;
+                            self.attempt_open = true;
+                            log.info("rdp pane: reconnecting attempt={d} reason={d}", .{ self.reconnects, reason });
+                            noteEvent("pane={x} dropped reason={d}, reconnect attempt={d}", .{ @intFromPtr(self), reason, self.reconnects });
+                            self.connect();
+                            return;
+                        },
+                    }
                 },
                 .end => break :end,
             }
@@ -1189,7 +1345,7 @@ pub const Pane = struct {
         if (self.probe) |probe| switch (probe.result()) {
             .checking => {
                 self.offline_polls +|= 1;
-                return if (self.offline_polls > max_offline_polls) .gave_up else .waiting;
+                return if (self.offline_polls > max_offline_polls and !self.options.persistent_reconnect) .gave_up else .waiting;
             },
             .answered => {
                 probe.release();
@@ -1210,12 +1366,16 @@ pub const Pane = struct {
             },
         };
         self.offline_polls +|= 1;
-        if (self.offline_polls > max_offline_polls) {
+        // A keep-reconnecting pane waits for the network as long as it
+        // takes, checking less often after the usual wait.
+        const keeps = self.options.persistent_reconnect;
+        if (self.offline_polls > max_offline_polls and !keeps) {
             noteEvent("pane={x} gave up waiting for the network", .{@intFromPtr(self)});
             return .gave_up;
         }
+        const every: u32 = if (self.offline_polls > max_offline_polls) 30 else probe_every_polls;
         // The first check at once; then one every few polls.
-        if (self.offline_polls == 1 or self.offline_polls % probe_every_polls == 0) {
+        if (self.offline_polls == 1 or self.offline_polls % every == 0) {
             // No thread for the check: sign in as before, without waiting.
             self.probe = Probe.start(self.server, self.port) orelse return .ready;
         }
@@ -1345,16 +1505,58 @@ fn promptCredentials(alloc: Allocator, owner: HWND, user: []const u8) ?Typed {
     return .{ .user = user_text, .password = password_text, .save = save != 0 };
 }
 
-test "rdp pane: a drop reconnects a few times at most, and a failed first login never" {
-    // Never connected: the login or the server failed; retrying a wrong
-    // password locks the account.
-    try std.testing.expectEqual(Drop.end, afterDrop(false, 0, 0, 100));
+test "rdp pane: a drop reconnects a few times at most, and a failed first login once" {
+    const d = struct {
+        fn of(was_connected: bool, reason: i32, reconnects: u32, idle_polls: u32) Drop {
+            return afterDrop(.{ .was_connected = was_connected, .reason = reason, .reconnects = reconnects, .idle_polls = idle_polls });
+        }
+    }.of;
+    // Never connected, its one retry spent: the login or the server
+    // failed; retrying a wrong password locks the account.
+    try std.testing.expectEqual(Drop.end, d(false, 0, 0, 100));
     // Ended by the server or the person.
-    try std.testing.expectEqual(Drop.end, afterDrop(true, 12, 0, 100));
-    try std.testing.expectEqual(Drop.wait, afterDrop(true, 0, 0, 0));
-    try std.testing.expectEqual(Drop.reconnect, afterDrop(true, 0, 0, reconnect_delay_polls));
-    try std.testing.expectEqual(Drop.reconnect, afterDrop(true, 0, max_reconnects - 1, reconnect_delay_polls));
-    try std.testing.expectEqual(Drop.end, afterDrop(true, 0, max_reconnects, reconnect_delay_polls));
+    try std.testing.expectEqual(Drop.end, d(true, 12, 0, 100));
+    try std.testing.expectEqual(Drop.wait, d(true, 0, 0, 0));
+    try std.testing.expectEqual(Drop.reconnect, d(true, 0, 0, reconnect_delay_polls));
+    try std.testing.expectEqual(Drop.reconnect, d(true, 0, max_reconnects - 1, reconnect_delay_polls));
+    try std.testing.expectEqual(Drop.end, d(true, 0, max_reconnects, reconnect_delay_polls));
+}
+
+test "rdp pane: a first connection that never came up is retried once" {
+    const first: DropState = .{ .was_connected = false, .reason = 0, .reconnects = 0, .idle_polls = 0, .first_retry_done = false };
+    try std.testing.expectEqual(Drop.wait, afterDrop(first));
+    var later = first;
+    later.idle_polls = first_retry_delay_polls;
+    try std.testing.expectEqual(Drop.reconnect, afterDrop(later));
+    // A reason no retry mends.
+    later.reason = 9;
+    try std.testing.expectEqual(Drop.end, afterDrop(later));
+}
+
+test "rdp pane: keep reconnecting goes in bursts, pauses, and ends only for good reasons" {
+    var state: DropState = .{ .was_connected = true, .reason = 0, .reconnects = 0, .idle_polls = reconnect_delay_polls, .persistent = true };
+    // A reason the default ends on (a server-side timeout) still retries.
+    state.reason = 3;
+    try std.testing.expectEqual(Drop.reconnect, afterDrop(state));
+    state.reconnects = persistent_burst - 1;
+    try std.testing.expectEqual(Drop.reconnect, afterDrop(state));
+    state.reconnects = persistent_burst;
+    try std.testing.expectEqual(Drop.pause, afterDrop(state));
+    // Past the network wait the default gives up on, it does not.
+    state.reconnects = 0;
+    try std.testing.expectEqual(Drop.reconnect, afterDrop(state));
+    // A refused burst (a changed password): one sign-in a pause.
+    state.refused = persistent_burst;
+    state.reconnects = 1;
+    try std.testing.expectEqual(Drop.pause, afterDrop(state));
+    // Signed out, taken by another connection, or the account refused.
+    for ([_]i32{ 2, 5, 9, 10, 12, 256 }) |reason| {
+        state.reason = reason;
+        try std.testing.expectEqual(Drop.end, afterDrop(state));
+    }
+    try std.testing.expectEqual(@as(u32, 5), pauseMinutes(0));
+    try std.testing.expectEqual(@as(u32, 60), pauseMinutes(3));
+    try std.testing.expectEqual(@as(u32, 60), pauseMinutes(40));
 }
 
 test "rdp pane: targetOf takes mstsc /v: command lines only" {

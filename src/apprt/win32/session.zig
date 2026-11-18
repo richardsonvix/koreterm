@@ -26,6 +26,7 @@ const unixMillis = runtime.unixMillis;
 const win32_session_persistence = runtime.win32_session_persistence;
 const win32_session_state = runtime.win32_session_state;
 const window_state = @import("window_state.zig");
+const rdp_group = @import("rdp_group.zig");
 const windows = runtime.windows;
 const writePersistentFileAlloc = runtime.writePersistentFileAlloc;
 
@@ -723,11 +724,22 @@ pub fn restoreSessionPane(
         .split;
     var config = try apprt.surface.newConfig(self.core_app, &self.config, open_kind);
     defer config.deinit();
-    const launch = try configpkg.pane_launch.prepare(&config, .{ .restored = pane.profile }, self.launchContext(host));
-    if (pane.cwd) |cwd| {
+    // A group of Remote Desktop sessions opens them again, each from its
+    // profile; the tab itself launches nothing.
+    const group_start: ?rdp_group.Start = if (pane.rdp_group) |group| .{
+        .name = if (group.name.len != 0) group.name else null,
+        .colors = rdp_group.Colors.fromBits(group.colors) orelse .c16,
+        .saved_ids = group.profiles,
+        .from_saved_line = false,
+    } else null;
+    const launch: configpkg.pane_launch.Stamp = if (group_start != null)
+        .{}
+    else
+        try configpkg.pane_launch.prepare(&config, .{ .restored = pane.profile }, self.launchContext(host));
+    if (group_start == null) if (pane.cwd) |cwd| {
         const alloc = config._arena.?.allocator();
         config.@"working-directory" = .{ .path = try alloc.dupe(u8, cwd) };
-    }
+    };
 
     const tab_id = if (tab_surface) |source|
         (Host.findTabForSurface(source) orelse return error.NoActiveSurface).tab.id
@@ -741,6 +753,7 @@ pub fn restoreSessionPane(
         .split_direction = split_direction,
         .window = if (host == null) .{ .restore = into.window } else .fresh,
         .launch = launch,
+        .rdp_group = group_start,
     });
     transaction.noteSurface(surface);
 
@@ -1022,13 +1035,17 @@ pub fn buildSessionLayout(
                         "tab_title_override",
                         if (surface.launched_ssh) null else surface.tab_title_override,
                     ),
-                    .scrollback = surface.captureSessionScrollback(
+                    .scrollback = if (surface.rdp_group != null) null else surface.captureSessionScrollback(
                         alloc,
                         scrollback_lines,
                         remaining_scrollback_budget,
                     ) catch |err| snapshot: {
                         log.warn("win32 session save: pane snapshot omitted err={}", .{err});
                         break :snapshot null;
+                    },
+                    .rdp_group = sessionRdpGroup(alloc, surface) catch |err| group: {
+                        log.warn("win32 session save: rdp group omitted err={}", .{err});
+                        break :group null;
                     },
                 } },
                 .layout => .{ .pane = .{
@@ -1067,6 +1084,28 @@ pub fn buildSessionLayout(
 /// Drop a single pane field that a hostile source (OSC 7 pwd, OSC 0/2
 /// title) made unsafe, rather than failing the whole save. The load path
 /// stays strict: `win32_session_state.validatePane` rejects the file.
+/// A Remote Desktop group's tab as the session keeps it: its name, colors
+/// and the profile of each session (`rdp_group.savedLine` keeps the same).
+/// Null for any other pane, or a group none of whose sessions came from a
+/// profile.
+fn sessionRdpGroup(alloc: Allocator, surface: *const Surface) !?win32_session_state.RdpGroup {
+    const group = surface.rdp_group orelse return null;
+    var ids: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (group.members.items) |member| {
+        if (ids.items.len >= win32_session_state.max_rdp_group_profiles) break;
+        const id = member.pane.profile_id orelse continue;
+        if (id.len == 0 or !win32_session_state.isValidPaneText(id)) continue;
+        try ids.append(alloc, try alloc.dupe(u8, id));
+    }
+    if (ids.items.len == 0) return null;
+    const name = sessionSnapshotPaneText("rdp_group", group.name) orelse "";
+    return .{
+        .name = try alloc.dupe(u8, name),
+        .colors = group.colors.bits(),
+        .profiles = try ids.toOwnedSlice(alloc),
+    };
+}
+
 pub fn sessionSnapshotPaneText(field: []const u8, value: ?[]const u8) ?[]const u8 {
     const text = value orelse return null;
     // A working directory on a network share or device is never written:
@@ -1661,6 +1700,7 @@ test "win32 ssh split and session state drop remote cwd" {
     surface.launch_profile_key = null;
     surface.title_override = null;
     surface.tab_title_override = null;
+    surface.rdp_group = null;
     var tab = try Tab.init(std.testing.allocator, 1, &surface);
     defer tab.deinit();
 

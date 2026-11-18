@@ -1,3 +1,22 @@
+koreterm 1.3.150
+
+- Export to Remote Desktop File (.rdp) in a Remote Desktop tab's
+  right-click menu and in the Profiles list's menu (Settings): the
+  connection as a standard Windows .rdp file that mstsc.exe opens, with
+  its server, port, user name and quality settings. The password is not
+  written: Remote Desktop asks for it.
+- "Keep reconnecting if the connection drops" in a Remote Desktop
+  connection's window (off by default): a session that drops tries three
+  sign-ins, then waits 5, 15, 30 and then 60 minutes between tries, and
+  waits for the network as long as it takes. Once a whole round is refused
+  (a changed password, say) it tries once a pause. Reconnect in the tab's
+  menu tries at once. It stops for a sign-out, a session another
+  connection took, or an account the server refuses.
+- A Remote Desktop tab whose first connection fails retries once by itself
+  a few seconds later, instead of showing the "session ended" text.
+- Session restore brings back Remote Desktop groups, every session in
+  them, and sessions that left a group or were detached.
+
 koreterm 1.3.149
 
 - A Remote Desktop tab whose connection drops waits for the network (up

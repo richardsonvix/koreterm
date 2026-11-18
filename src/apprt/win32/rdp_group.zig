@@ -181,6 +181,10 @@ pub const Start = struct {
     colors: Colors = .c16,
     /// Profile ids of the sessions to open.
     saved_ids: []const []const u8 = &.{},
+    /// Opened from its line in `rdp-groups.txt`, which a rename then moves.
+    /// Off for a group session restore reopens, which may never have been
+    /// saved there.
+    from_saved_line: bool = true,
 };
 
 /// Every group open, for the tab menu's Add to Group. The UI thread's only.

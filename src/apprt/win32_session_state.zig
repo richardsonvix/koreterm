@@ -182,7 +182,23 @@ pub const Pane = struct {
     title_override: ?[]const u8 = null,
     tab_title_override: ?[]const u8 = null,
     scrollback: ?ScrollbackSnapshot = null,
+    /// The pane is a tab of Remote Desktop sessions (`win32/rdp_group.zig`):
+    /// restore opens the group again, each session from its profile.
+    rdp_group: ?RdpGroup = null,
 };
+
+/// A group of Remote Desktop sessions, as its saved line in
+/// `rdp-groups.txt` holds it (`rdp_group.savedLine`).
+pub const RdpGroup = struct {
+    name: []const u8 = "",
+    /// Bits per pixel: 8, 16 or 24 (`rdp_group.Colors`).
+    colors: i32 = 16,
+    /// The profile id of each session, in the grid's order.
+    profiles: []const []const u8 = &.{},
+};
+
+/// The most sessions one saved group restores.
+pub const max_rdp_group_profiles: usize = 64;
 
 pub const ScrollbackSnapshot = struct {
     captured_at_unix_ms: u64,
@@ -469,6 +485,13 @@ fn validatePane(pane: Pane) ValidationError!void {
     }) |value| {
         if (value) |text| {
             if (!isValidPaneText(text)) return error.InvalidPaneText;
+        }
+    }
+    if (pane.rdp_group) |group| {
+        if (!isValidPaneText(group.name)) return error.InvalidPaneText;
+        if (group.profiles.len > max_rdp_group_profiles) return error.InvalidPaneText;
+        for (group.profiles) |id| {
+            if (id.len == 0 or !isValidPaneText(id)) return error.InvalidPaneText;
         }
     }
 }

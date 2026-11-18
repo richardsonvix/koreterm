@@ -10,3 +10,4 @@
 - [RDP clipboard release](rdp-clipboard-release.md) — RDP tab froze pastes; session keeps clipboard only while focused (built 2026-11-16, unverified)
 - [Tab detach backlog](tab-detach-backlog.md) — pending detach/dock for all tabs, menu only, build + filtered tests
 - [RDP server actions](rdp-server-actions.md) — Server Status, sign-out, Explorer restart, forced restart, admin login, TrustedHosts: written 2026-11-17 uncompiled for 1.3.149
+- [RDP .rdp export, persistent reconnect, group restore](rdp-file-export.md) — .rdp export, per-profile keep-reconnecting, RDP group session restore: written 2026-11-18 uncompiled for 1.3.150

@@ -466,6 +466,9 @@ pub const CTX_TAB_RECORD: usize = 4041;
 /// A Remote Desktop tab's "Reconnect", once its session has ended
 /// (`Surface.reconnectRdp`).
 pub const CTX_TAB_RDP_RECONNECT: usize = 4042;
+/// A Remote Desktop tab's "Export to Remote Desktop File (.rdp)..."
+/// (`Surface.exportRdpFile`, `rdp_file.zig`).
+pub const CTX_TAB_RDP_EXPORT: usize = 4043;
 /// The new-tab menu's Remote Desktop > saved groups: CTX_RDP_SAVED_GROUP_BASE
 /// + the line's index in `rdp-groups.txt`.
 pub const CTX_RDP_SAVED_GROUP_BASE: usize = 4600;

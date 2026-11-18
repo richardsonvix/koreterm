@@ -8050,12 +8050,16 @@ pub const Host = struct {
         const group_tab: ?*rdp_group.Group = if (tab_surface) |surface| surface.rdp_group else null;
         if (is_rdp and group_tab == null) {
             const live_session = if (tab_surface) |surface| surface.rdp_pane != null else false;
+            // A keep-reconnecting session between bursts of sign-ins.
+            const paused = if (tab_surface) |surface| (if (surface.rdp_pane) |pane| pane.isPaused() else false) else false;
             // A session that ended comes back from here, in the same tab.
-            if (!live_session) _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_TAB_RDP_RECONNECT, std.unicode.utf8ToUtf16LeStringLiteral("Reconnect"));
+            if (!live_session or paused) _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_TAB_RDP_RECONNECT, std.unicode.utf8ToUtf16LeStringLiteral("Reconnect"));
             // Both reach the server without the session too (a frozen
             // server drops it): its Server buttons and Server Status.
             _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_TAB_RDP_COMMAND, std.unicode.utf8ToUtf16LeStringLiteral("Run Command on Remote Desktop..."));
             _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_TAB_RDP_STATUS, std.unicode.utf8ToUtf16LeStringLiteral("Server Status (CPU, Memory, Disks)..."));
+            // The connection as a file mstsc.exe opens (no password in it).
+            _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_TAB_RDP_EXPORT, std.unicode.utf8ToUtf16LeStringLiteral("Export to Remote Desktop File (.rdp)..."));
             // Add to Group: a new group's tab, or one already open.
             if (sys.CreatePopupMenu()) |group_menu| {
                 _ = sys.AppendMenuW(group_menu, c.MF_STRING, c.CTX_TAB_RDP_GROUP_NEW, std.unicode.utf8ToUtf16LeStringLiteral("New Group"));
@@ -8154,6 +8158,11 @@ pub const Host = struct {
                 c.CTX_TAB_RDP_COMMAND => {
                     // A modal window: the Host may be gone after it.
                     surface.openRdpCommandDialog(.command);
+                    return true;
+                },
+                c.CTX_TAB_RDP_EXPORT => {
+                    // A modal file dialog: the Host may be gone after it.
+                    surface.exportRdpFile();
                     return true;
                 },
                 c.CTX_TAB_RDP_RECONNECT => {
