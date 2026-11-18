@@ -1724,6 +1724,7 @@ test "win32 session and layout snapshots drop network and device cwds" {
     surface.launch_profile_key = null;
     surface.title_override = null;
     surface.tab_title_override = null;
+    surface.rdp_group = null;
     var tab = try Tab.init(std.testing.allocator, 1, &surface);
     defer tab.deinit();
 
@@ -2434,6 +2435,7 @@ test "win32 session save skips every tab of the quick terminal host" {
     normal_surface.launch_profile_key = null;
     normal_surface.title_override = null;
     normal_surface.tab_title_override = null;
+    normal_surface.rdp_group = null;
     try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 3, &normal_surface));
     try app.registry.addHost(std.testing.allocator, &host);
 
@@ -2472,6 +2474,7 @@ test "security regression win32 session save drops one hostile pane field" {
     surface.launch_profile_key = "pwsh";
     surface.title_override = "Build\x1b\x07";
     surface.tab_title_override = "Docs";
+    surface.rdp_group = null;
     try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &surface));
     try app.registry.addHost(std.testing.allocator, &host);
 

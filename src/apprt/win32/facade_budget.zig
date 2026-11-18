@@ -84,8 +84,9 @@ const leaves = .{
         .source = @embedFile("tab_label.zig"),
         // why: `title_glyph` and `withTitleGlyph`, because the window
         // caption shows the bell glyph too, and `tooltip_max_width`, which
-        // sizes Host's tooltip paint buffer.
-        .pub_decls = 11,
+        // sizes Host's tooltip paint buffer; `withoutAdminPrefix`, which
+        // Host applies to an elevated instance's titles.
+        .pub_decls = 12,
     },
     .{
         .file = "window_start.zig",

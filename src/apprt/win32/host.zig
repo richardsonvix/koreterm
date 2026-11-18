@@ -9090,13 +9090,20 @@ pub const Host = struct {
         // to the strip's. A profile's color stripe goes just under it.
         const accent_bar = tab_button and active and !disabled and !is_hc and !overlay;
         const accent_h = self.scaled(3);
+        // On the tab's outline: a restored window's tab is a rounded
+        // rectangle one pixel below the button's top (`gdi.drawTabButton`),
+        // and the bar stays inside its rounded corners; a flush tab's top
+        // is square and starts at the button's top.
+        const flush = self.tabsFlushWithTop();
+        const accent_top = draw.rcItem.top + content_top_inset + @as(i32, if (flush) 0 else 1);
+        const accent_side: i32 = if (flush) 1 else self.scaled(2);
         if (accent_bar) fillSolidRect(draw.hDC, .{
-            .left = draw.rcItem.left + 1,
-            .top = draw.rcItem.top + content_top_inset,
-            .right = draw.rcItem.right - 1,
-            .bottom = draw.rcItem.top + content_top_inset + accent_h,
+            .left = draw.rcItem.left + accent_side,
+            .top = accent_top,
+            .right = draw.rcItem.right - accent_side,
+            .bottom = accent_top + accent_h,
         }, if (self.window_active) theme.accent else adjustColor(theme.accent, -40, -40, -40));
-        const stripe_top = draw.rcItem.top + content_top_inset + if (accent_bar) accent_h + self.scaled(1) else self.scaled(1);
+        const stripe_top = if (accent_bar) accent_top + accent_h + self.scaled(1) else draw.rcItem.top + content_top_inset + self.scaled(1);
         if (tab_color) |color| fillSolidRect(draw.hDC, .{
             .left = draw.rcItem.left + self.scaled(4),
             .top = stripe_top,

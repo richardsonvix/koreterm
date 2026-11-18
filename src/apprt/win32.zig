@@ -21722,6 +21722,12 @@ fn testTabGapHost(decorated: bool) !void {
     surface.inspector_visible = false;
     // The background the active tab takes.
     surface.tab_background = rgb(0x28, 0x2C, 0x34);
+    // The tab's profile color and icon (`Surface.tabColor`, `tabIconAt`)
+    // read the launch: none here.
+    surface.launch_user = null;
+    surface.launch_command = null;
+    surface.tab_icon = null;
+    surface.tab_icon_px = 0;
     try host.tabs.ensureTotalCapacity(std.testing.allocator, 1);
     host.tabs.appendAssumeCapacity(try Tab.init(std.testing.allocator, 1, &surface));
     defer {
@@ -21848,8 +21854,13 @@ fn testTabGapHost(decorated: bool) !void {
             const pixel = canvas.pixel(@divTrunc(canvas.width, 2), 0);
             if (maximized) {
                 try std.testing.expect(pixel != theme.chrome_bg);
-                // The active tab has no border: its edge is its terminal's background.
-                if (active and !isHighContrastActive()) try std.testing.expectEqual(rgb(0x28, 0x2C, 0x34), pixel);
+                // The active tab has no border: below its accent bar
+                // (`scaled(3)` rows under the content inset) it is its
+                // terminal's background.
+                if (active and !isHighContrastActive()) {
+                    const below_bar = canvas.pixel(@divTrunc(canvas.width, 2), host.tabContentTopInset() + host.scaled(3));
+                    try std.testing.expectEqual(rgb(0x28, 0x2C, 0x34), below_bar);
+                }
             } else try std.testing.expectEqual(theme.chrome_bg, pixel);
         }
         host.active_tab = 1;

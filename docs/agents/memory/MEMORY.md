@@ -4,7 +4,7 @@
 - [RDP run command, uncompiled](rdp-run-command-uncompiled.md) — RDP command, favorites, preset notes, single-window launch, RDP DPI resize: built into 1.3.143 (2026-11-13) without tests; verify on a real RDP session
 - [RDP groups](rdp-groups.md) — grid of watch-only RDP sessions plus detach/dock and RDP tab hint, built into 1.3.144 on 2026-11-13 (only rdp + settings_patch filters tested); verify on real sessions
 - [Tab capture](tab-capture-backlog.md) — tab snapshot PNG + MP4 recording (red tab) written 2026-11-17 uncompiled for 1.3.149; per-tab fullscreen still pending
-- [Build environment](koreterm-build-env.md) — ZIG_GLOBAL_CACHE_DIR on D:, known TABGAP failure, update.zip packaging steps
+- [Build environment](koreterm-build-env.md) — ZIG_GLOBAL_CACHE_DIR on D:, update.zip packaging steps
 - [CI removed](ci-workflows-disabled.md) — fork has no GitHub Actions: workflows disabled then deleted 2026-11-13
 - [Elevated instance](elevated-tab-mark.md) — admin tabs live only in a separate UAC instance; no color mark; prefix stripped, Run-as hidden there; built into 1.3.145
 - [RDP clipboard release](rdp-clipboard-release.md) — RDP tab froze pastes; session keeps clipboard only while focused (built 2026-11-16, unverified)
