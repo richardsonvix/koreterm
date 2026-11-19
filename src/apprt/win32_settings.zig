@@ -8295,6 +8295,14 @@ pub const SettingsWindow = struct {
     /// `windows_shell.notes_env`), and the login is kept apart from the
     /// config (`profile_credentials`). Save writes the draft.
     fn profileEditRdp(self: *SettingsWindow, existing_id: ?[]const u8) void {
+        self.profileEditRdpAs(existing_id, false);
+    }
+
+    /// `profileEditRdp`, or with `copy` a new connection that starts as a
+    /// copy of `existing_id`: its settings, notes and logins (kept under
+    /// the new profile once it is OK'd), named "<name> (copy)".
+    fn profileEditRdpAs(self: *SettingsWindow, source_id: ?[]const u8, copy: bool) void {
+        const existing_id: ?[]const u8 = if (copy) null else source_id;
         if (!self.draftTakesEdits()) return;
         if (!self.profileEditDone()) return;
         const alloc = self.handle.alloc;
@@ -8308,15 +8316,18 @@ pub const SettingsWindow = struct {
         var kept_admin: ?profile_credentials.Entry = null;
         defer if (kept_admin) |entry| entry.deinit(alloc);
         var id: ?[]const u8 = null;
-        if (existing_id) |given| {
+        if (source_id) |given| {
             const draft = if (self.pending) |*config| config else return;
-            id = a.dupe(u8, given) catch return self.profileChangeFailed();
+            if (!copy) id = a.dupe(u8, given) catch return self.profileChangeFailed();
             const command = draft.@"profile-command".get(given) orelse return;
             const target = terminals_import.parseCommand(command) orelse return;
             conn.server = a.dupe(u8, target.server) catch return self.profileChangeFailed();
             conn.port = target.port;
             conn.options = target.rdp;
-            conn.name = a.dupe(u8, draft.@"profile-name".get(given) orelse given) catch return self.profileChangeFailed();
+            conn.name = if (copy)
+                std.fmt.allocPrint(a, "{s} (copy)", .{draft.@"profile-name".get(given) orelse given}) catch return self.profileChangeFailed()
+            else
+                a.dupe(u8, draft.@"profile-name".get(given) orelse given) catch return self.profileChangeFailed();
             if (draft.@"profile-env".get(given)) |env| {
                 var it = env.iterator();
                 while (it.next()) |kv| if (std.ascii.eqlIgnoreCase(kv.key_ptr.*, windows_shell.notes_env)) {
@@ -8339,7 +8350,12 @@ pub const SettingsWindow = struct {
                 }
             }
         }
-        const title = if (existing_id == null) std.unicode.utf8ToUtf16LeStringLiteral("New Remote Desktop connection") else std.unicode.utf8ToUtf16LeStringLiteral("Edit Remote Desktop connection");
+        const title = if (copy)
+            std.unicode.utf8ToUtf16LeStringLiteral("Duplicate Remote Desktop connection")
+        else if (existing_id == null)
+            std.unicode.utf8ToUtf16LeStringLiteral("New Remote Desktop connection")
+        else
+            std.unicode.utf8ToUtf16LeStringLiteral("Edit Remote Desktop connection");
         const accepted = rdp_dialog.edit(a, self.hwnd, &conn, title) catch return self.profileChangeFailed();
         if (!accepted) return;
         // The dialog's loop may have let an external reload replace the draft.
@@ -8383,7 +8399,11 @@ pub const SettingsWindow = struct {
         }
         // The login: a password typed in, or the kept one under a new user.
         const password: []const u8 = conn.password orelse if (kept) |entry| entry.password else "";
-        if (conn.password != null or (kept == null and conn.user.len != 0) or (kept != null and !std.mem.eql(u8, kept.?.user, conn.user))) {
+        // A copy has nothing kept under its new id yet: it keeps the login.
+        if (copy and (conn.user.len != 0 or password.len != 0)) {
+            profile_credentials.store(saved_id, conn.user, password) catch
+                self.setProfileNote(.refused, "Error: the login could not be kept.", .{});
+        } else if (conn.password != null or (kept == null and conn.user.len != 0) or (kept != null and !std.mem.eql(u8, kept.?.user, conn.user))) {
             profile_credentials.store(saved_id, conn.user, password) catch
                 self.setProfileNote(.refused, "Error: the login could not be kept.", .{});
         }
@@ -8392,8 +8412,8 @@ pub const SettingsWindow = struct {
         var admin_buf: [128]u8 = undefined;
         if (profile_credentials.adminId(&admin_buf, saved_id)) |admin_id| {
             if (conn.admin_user.len == 0) {
-                if (kept_admin != null) profile_credentials.remove(admin_id);
-            } else if (conn.admin_password != null or kept_admin == null or !std.mem.eql(u8, kept_admin.?.user, conn.admin_user)) {
+                if (kept_admin != null and !copy) profile_credentials.remove(admin_id);
+            } else if (copy or conn.admin_password != null or kept_admin == null or !std.mem.eql(u8, kept_admin.?.user, conn.admin_user)) {
                 const admin_password: []const u8 = conn.admin_password orelse if (kept_admin) |entry| entry.password else "";
                 profile_credentials.store(admin_id, conn.admin_user, admin_password) catch
                     self.setProfileNote(.refused, "Error: the administrator login could not be kept.", .{});
@@ -8730,6 +8750,30 @@ pub const SettingsWindow = struct {
                 return self.setProfileNote(.said, "The profile this tab was opened from is no longer listed.", .{});
             }
         }
+        if (had_changes) return;
+        if (self.hasPendingChanges()) {
+            if (opened_for_it) self.close_after_save = true;
+            self.save();
+        }
+        if (opened_for_it and !self.close_posted and !self.hasPendingChanges()) self.postCloseNow();
+    }
+
+    /// The new-tab menu's Remote Desktop > New Connection, or a Remote
+    /// Desktop tab's Duplicate Connection (`copy_of`, a profile key such as
+    /// `user:<id>`): the connection window on the Profiles page. The new
+    /// connection is saved at once, as `editProfileFromTab` saves an edit,
+    /// so the menus list it; a window opened only for it closes after.
+    pub fn newRdpConnection(self: *SettingsWindow, copy_of: ?[]const u8, opened_for_it: bool) void {
+        if (self.hwnd == null) return;
+        self.setActiveSection(.profiles);
+        self.ensureProfileModel();
+        const had_changes = self.hasPendingChanges();
+        if (copy_of) |key| {
+            const user_prefix = "user:";
+            if (!std.ascii.startsWithIgnoreCase(key, user_prefix) or !self.profileIsRdp(key[user_prefix.len..]))
+                return self.setProfileNote(.said, "The connection this tab was opened from is no longer listed.", .{});
+            self.profileEditRdpAs(key[user_prefix.len..], true);
+        } else self.profileEditRdp(null);
         if (had_changes) return;
         if (self.hasPendingChanges()) {
             if (opened_for_it) self.close_after_save = true;
@@ -9832,6 +9876,7 @@ pub const SettingsWindow = struct {
         };
         // A Remote Desktop connection as a file mstsc.exe opens.
         if (self.profile_model.profileOf(row)) |profile| if (row.kind != .new_profile and !profile.found_hidden and self.profileIsRdp(profile.id)) {
+            _ = sys.AppendMenuW(menu, MF_STRING | @as(UINT, if (self.draftTakesEdits()) 0 else MF_GRAYED), profile_menu_duplicate_rdp, std.unicode.utf8ToUtf16LeStringLiteral("D&uplicate connection..."));
             _ = sys.AppendMenuW(menu, MF_STRING, profile_menu_export_rdp, std.unicode.utf8ToUtf16LeStringLiteral("Export to Remote Desktop &file (.rdp)..."));
         };
         _ = sys.AppendMenuW(menu, MF_STRING | @as(UINT, if (self.draftTakesEdits()) 0 else MF_GRAYED), profile_menu_new_rdp, std.unicode.utf8ToUtf16LeStringLiteral("New &Remote Desktop connection..."));
@@ -9859,6 +9904,14 @@ pub const SettingsWindow = struct {
             profile_menu_delete => self.profileDeleteFromMenu(),
             profile_menu_export => self.profileExportTerminals(),
             profile_menu_export_rdp => if (self.profile_model.profileOf(row)) |profile| self.profileExportRdp(profile.id),
+            profile_menu_duplicate_rdp => if (self.profile_model.profileOf(row)) |profile| {
+                // A copy: the dialog's loop may let a reload replace the model.
+                var id_buf: [profile_map.max_id_len]u8 = undefined;
+                if (profile.id.len <= id_buf.len) {
+                    @memcpy(id_buf[0..profile.id.len], profile.id);
+                    self.profileEditRdpAs(id_buf[0..profile.id.len], true);
+                }
+            },
             profile_menu_backup => self.backupAllSettings(),
             reference_menu_open => self.handle.openInEditor(self.handle.ctx),
             else => {},
@@ -22674,6 +22727,7 @@ const profile_menu_sort: usize = 15;
 const profile_menu_mine: usize = 16;
 const profile_menu_favorite: usize = 17;
 const profile_menu_export_rdp: usize = 18;
+const profile_menu_duplicate_rdp: usize = 19;
 /// What the Profiles list's UIA help text says: the keys it takes.
 const profile_list_help = "Up and Down move through the profiles, in the picker's order, and your profiles' fields: command line, name, starting folder and variables. " ++
     "Enter edits the selected field, Delete removes it (a profile asks twice), Insert or Ctrl+N adds a profile, Ctrl+I imports profiles from a Terminals export, Alt+Up and Alt+Down move a profile, Ctrl+H hides it or shows it, and Shift+F10 offers these. " ++

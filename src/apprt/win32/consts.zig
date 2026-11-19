@@ -474,6 +474,10 @@ pub const CTX_TAB_RDP_EXPORT: usize = 4043;
 /// `rdp_transfer.zig`).
 pub const CTX_TAB_RDP_SEND_FILES: usize = 4044;
 pub const CTX_TAB_RDP_TRANSFER_FOLDER: usize = 4045;
+/// A Remote Desktop tab's "Duplicate Connection...", and the new-tab menu's
+/// Remote Desktop > "New Connection..." (`SettingsWindow.newRdpConnection`).
+pub const CTX_TAB_RDP_DUPLICATE: usize = 4046;
+pub const CTX_RDP_NEW_CONNECTION: usize = 4047;
 /// The new-tab menu's Remote Desktop > saved groups: CTX_RDP_SAVED_GROUP_BASE
 /// + the line's index in `rdp-groups.txt`.
 pub const CTX_RDP_SAVED_GROUP_BASE: usize = 4600;

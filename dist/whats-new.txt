@@ -1,3 +1,11 @@
+koreterm 1.3.153
+
+- A Remote Desktop connection can be made from scratch and copied where
+  you look for it: the new-tab menu's Remote Desktop > New Connection...,
+  a Remote Desktop tab's Duplicate Connection..., and Duplicate
+  connection... in the Settings Profiles list's menu. A copy starts with
+  the connection's settings, notes and login (password included), named
+  "<name> (copy)".
 koreterm 1.3.152
 
 - An exported Remote Desktop file (.rdp) now carries the connection's

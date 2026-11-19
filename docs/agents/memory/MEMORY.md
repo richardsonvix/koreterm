@@ -12,3 +12,4 @@
 - [RDP server actions](rdp-server-actions.md) — Server Status, sign-out, Explorer restart, forced restart, admin login, TrustedHosts: written 2026-11-17 uncompiled for 1.3.149
 - [RDP .rdp export, persistent reconnect, group restore](rdp-file-export.md) — .rdp export (password via DPAPI added 2026-11-19 for 1.3.152), keep-reconnecting, group restore; open question on reason=5 drops; built into 1.3.152
 - [RDP transfer](rdp-transfer.md) — Send Files to Server through a shared transfer folder (\tsclient), built into 1.3.152, unverified on a real server
+- [Discoverability](feedback-discoverability.md) — check create/duplicate flows are reachable from tab/new-tab menus; point out gaps unasked

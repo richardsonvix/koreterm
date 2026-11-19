@@ -8060,6 +8060,9 @@ pub const Host = struct {
             _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_TAB_RDP_STATUS, std.unicode.utf8ToUtf16LeStringLiteral("Server Status (CPU, Memory, Disks)..."));
             // The connection as a file mstsc.exe opens (no password in it).
             _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_TAB_RDP_EXPORT, std.unicode.utf8ToUtf16LeStringLiteral("Export to Remote Desktop File (.rdp)..."));
+            // A new connection that starts as a copy of this one.
+            const from_profile = if (tab_surface) |surface| surface.launch_profile_key != null else false;
+            if (from_profile) _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_TAB_RDP_DUPLICATE, std.unicode.utf8ToUtf16LeStringLiteral("Duplicate Connection..."));
             // Files for the server, through the session's shared folder.
             const shares = if (tab_surface) |surface| surface.rdpSharesTransfer() else false;
             if (shares) {
@@ -8169,6 +8172,11 @@ pub const Host = struct {
                 c.CTX_TAB_RDP_EXPORT => {
                     // A modal file dialog: the Host may be gone after it.
                     surface.exportRdpFile();
+                    return true;
+                },
+                c.CTX_TAB_RDP_DUPLICATE => {
+                    // A modal window: the Host may be gone after it.
+                    duplicateRdpOfSurface(live.app, surface);
                     return true;
                 },
                 c.CTX_TAB_RDP_SEND_FILES => {
@@ -8441,6 +8449,7 @@ pub const Host = struct {
             }
             if (listed > 0) _ = sys.AppendMenuW(rdp_menu, c.MF_SEPARATOR, 0, null);
         }
+        _ = sys.AppendMenuW(rdp_menu, c.MF_STRING, c.CTX_RDP_NEW_CONNECTION, std.unicode.utf8ToUtf16LeStringLiteral("New Connection..."));
         _ = sys.AppendMenuW(rdp_menu, c.MF_STRING, c.CTX_EDIT_CONNECTIONS, std.unicode.utf8ToUtf16LeStringLiteral("Edit connections..."));
         _ = sys.AppendMenuW(rdp_menu, c.MF_STRING, c.CTX_IMPORT_TERMINALS, std.unicode.utf8ToUtf16LeStringLiteral("Import from Terminals..."));
         _ = sys.AppendMenuW(menu, c.MF_POPUP, @intFromPtr(rdp_menu), std.unicode.utf8ToUtf16LeStringLiteral("Remote Desktop"));
@@ -8562,6 +8571,13 @@ pub const Host = struct {
                 app.settings_window.backupAllSettings();
                 return;
             },
+            c.CTX_RDP_NEW_CONNECTION => {
+                const app = self.app;
+                const was_open = app.settings_window.hwnd != null;
+                runUiActionOrLog("overflow settings failed", app.performAction(.app, .open_config, {}));
+                app.settings_window.newRdpConnection(null, !was_open);
+                return;
+            },
             c.CTX_EDIT_CONNECTIONS => {
                 const app = self.app;
                 runUiActionOrLog("overflow settings failed", app.performAction(.app, .open_config, {}));
@@ -8629,6 +8645,18 @@ pub const Host = struct {
     /// A tab's Edit Profile: the window of the profile it was opened from,
     /// over Settings, which saves the change and closes again when it was
     /// not open before.
+    /// A Remote Desktop tab's Duplicate Connection: the connection window,
+    /// filled in from the tab's profile, for a new connection.
+    fn duplicateRdpOfSurface(app: *App, surface: *Surface) void {
+        const alloc = app.core_app.alloc;
+        // A copy: the window's loop may close the tab.
+        const key = alloc.dupe(u8, surface.launch_profile_key orelse return) catch return;
+        defer alloc.free(key);
+        const was_open = app.settings_window.hwnd != null;
+        runUiActionOrLog("tab context settings failed", app.performAction(.app, .open_config, {}));
+        app.settings_window.newRdpConnection(key, !was_open);
+    }
+
     fn editProfileOfSurface(app: *App, surface: *Surface) void {
         const alloc = app.core_app.alloc;
         // A copy: the window's loop may close the tab.
