@@ -322,6 +322,7 @@
       "scope": [
         "src/apprt/win32.zig",
         "src/apprt/win32/app.zig",
+        "src/apprt/win32/elevated_session.zig",
         "src/apprt/win32/registry.zig",
         "src/apprt/win32/chrome_scene.zig",
         "src/apprt/win32/host.zig",

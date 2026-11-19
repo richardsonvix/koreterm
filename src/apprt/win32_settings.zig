@@ -8912,7 +8912,7 @@ pub const SettingsWindow = struct {
     /// Desktop profile: its connection as written in the draft, with the
     /// user name the Credential Manager keeps for it and the config's
     /// quality settings for what it leaves at default, as a `.rdp` file
-    /// where the person picks (`rdp_file`). The password stays out.
+    /// where the person picks (`rdp_file`). The kept password goes in (DPAPI).
     fn profileExportRdp(self: *SettingsWindow, id_in: []const u8) void {
         if (!self.profileEditDone()) return;
         const alloc = self.handle.alloc;
@@ -8928,12 +8928,14 @@ pub const SettingsWindow = struct {
         var connection = parsed;
         connection.server = a.dupe(u8, parsed.server) catch return self.profileChangeFailed();
         var user: []const u8 = parsed.user;
+        var password_hex: ?[]const u8 = null;
         if (profile_credentials.readEntry(a, id) catch null) |kept| {
+            if (kept.password.len != 0) password_hex = profile_credentials.rdpFilePassword(a, kept.password) catch null;
             @memset(kept.password, 0);
             if (kept.user.len != 0) user = kept.user;
         }
         const name = a.dupe(u8, config.@"profile-name".get(id) orelse id) catch return self.profileChangeFailed();
-        const bytes = rdp_file.encode(a, connection, user, rdp_file.Defaults.of(config)) catch return self.profileChangeFailed();
+        const bytes = rdp_file.encode(a, connection, user, password_hex, rdp_file.Defaults.of(config)) catch return self.profileChangeFailed();
         var name_buf: [128]u16 = undefined;
         const default_name = rdp_file.fileName(&name_buf, name, connection.server);
         const path_buf = a.alloc(u16, 32768) catch return self.profileChangeFailed();
@@ -8947,7 +8949,10 @@ pub const SettingsWindow = struct {
         ) orelse return;
         writeWholeFile(path, bytes) catch
             return self.setProfileNote(.refused, "Error: the Remote Desktop file could not be written.", .{});
-        self.setProfileNote(.said, "Exported the connection to a Remote Desktop file. It holds no password: Remote Desktop asks for it when the file is opened.", .{});
+        if (password_hex != null)
+            self.setProfileNote(.said, "Exported the connection to a Remote Desktop file, with its password (encrypted: it signs in by itself only for this Windows user on this PC).", .{})
+        else
+            self.setProfileNote(.said, "Exported the connection to a Remote Desktop file. No password is kept for it: Remote Desktop asks for it when the file is opened.", .{});
     }
 
     /// The list menu's (and the window menu's) Back up all settings: one ZIP

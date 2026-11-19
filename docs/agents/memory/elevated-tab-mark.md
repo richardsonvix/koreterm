@@ -18,3 +18,5 @@ The design the user settled on:
 **Why:** the user asked for an amber tab bar and then dropped it, since every tab in an elevated instance is admin anyway.
 
 **How to apply:** do not add a per-tab admin mark, and keep the pipe separation. The tab_label filter covers the prefix test.
+
+2026-11-19, built into 1.3.152 (filters elevated_session, session passed): the user runs koreterm as administrator daily and asked that the elevated instance save its tabs. It now keeps its own session in `elevated\session-state.json` (`src/apprt/win32/elevated_session.zig`). The folder is admin-only and checked before every restore. A normal start whose last saved tabs were the elevated instance's shows a banner (`noteElevatedSessionSavedLater`). Test filter when a build is asked: `elevated_session`, `session`. Verify with a real elevated run that the folder is created owned by Administrators, and that tabs, names, RDP tabs and WSL/PowerShell folders come back.

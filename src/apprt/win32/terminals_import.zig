@@ -320,6 +320,10 @@ pub const RdpOptions = struct {
     /// bursts of a few sign-ins with longer and longer pauses between them
     /// (`rdp_pane.afterDrop`). Off: two tries, then the tab says it ended.
     persistent_reconnect: bool = false,
+    /// `/transfer:on`: the session gets this PC's transfer folder for the
+    /// connection as a drive (`\\tsclient\<letter>` on the server), where
+    /// the tab menu's Send Files puts files (`rdp_transfer`).
+    transfer: bool = false,
 };
 
 /// The command line of an RDP connection: `mstsc.exe /v:<server>[:<port>]`
@@ -333,6 +337,7 @@ pub fn writeRdpCommand(writer: *std.Io.Writer, server: []const u8, port: u16, op
     if (options.experience) |experience| try writer.print(" /experience:{t}", .{experience});
     if (options.trust_certificates) |trust| try writer.print(" /certificates:{s}", .{if (trust) "trust" else "ask"});
     if (options.persistent_reconnect) try writer.writeAll(" /reconnect:persistent");
+    if (options.transfer) try writer.writeAll(" /transfer:on");
 }
 
 /// Whether `server` can go on a command line as a host (`safeHost`).
@@ -388,6 +393,10 @@ pub fn parseCommand(command: []const u8) ?Connection {
             if (optionValue(arg, "certificates")) |value| {
                 if (std.ascii.eqlIgnoreCase(value, "trust")) conn.rdp.trust_certificates = true;
                 if (std.ascii.eqlIgnoreCase(value, "ask")) conn.rdp.trust_certificates = false;
+                continue;
+            }
+            if (optionValue(arg, "transfer")) |value| {
+                conn.rdp.transfer = std.ascii.eqlIgnoreCase(value, "on");
                 continue;
             }
             if (optionValue(arg, "reconnect")) |value| {
@@ -477,6 +486,11 @@ test "an RDP command line carries persistent reconnect only when on" {
     try std.testing.expectEqualStrings("mstsc.exe /v:srv /reconnect:persistent", writer.buffered());
     try std.testing.expect(parseCommand(writer.buffered()).?.rdp.persistent_reconnect);
     try std.testing.expect(!parseCommand("mstsc.exe /v:srv").?.rdp.persistent_reconnect);
+    writer.end = 0;
+    try writeRdpCommand(&writer, "srv", 5001, .{ .transfer = true });
+    try std.testing.expectEqualStrings("mstsc.exe /v:srv:5001 /transfer:on", writer.buffered());
+    try std.testing.expect(parseCommand(writer.buffered()).?.rdp.transfer);
+    try std.testing.expect(!parseCommand("mstsc.exe /v:srv").?.rdp.transfer);
 }
 
 test "an RDP command line carries the connection's own quality settings" {

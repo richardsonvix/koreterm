@@ -36,3 +36,5 @@ Detach and dock are also written, uncompiled, in the same change:
 - A saved group's new member starts at the grid's full size.
 - Levels lower colors only.
 - `release` turns keepDesktop off, and the adopting tab's `resize` sizes the session again.
+
+2026-11-19, built into 1.3.152 (build + `rdp` filter, 103/104): joining, leaving, a session ending and the CPU load no longer reconnect a session to change its options (`applyLevel` uses `Options.withoutReconnect`; `release` too). Only picking the group's colors from its menu reconnects. **Why:** the user's servers run an agent (FlaUI robots, "CNDSpiderBot") that hands a disconnected RDP session back to the console with tscon at once. Our disconnect-to-reconnect then ended the session with reason 5 (CND03 ended 7 s after leaving a group). `rdp_pane` also waits 3 polls after an options Disconnect and retries an options connect up to 3 times (`options_wait`, `max_options_attempts`). Verify on the real servers.

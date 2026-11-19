@@ -469,6 +469,11 @@ pub const CTX_TAB_RDP_RECONNECT: usize = 4042;
 /// A Remote Desktop tab's "Export to Remote Desktop File (.rdp)..."
 /// (`Surface.exportRdpFile`, `rdp_file.zig`).
 pub const CTX_TAB_RDP_EXPORT: usize = 4043;
+/// A Remote Desktop tab's "Send Files to Server..." and "Open Transfer
+/// Folder", when its connection shares one (`Surface.sendRdpFiles`,
+/// `rdp_transfer.zig`).
+pub const CTX_TAB_RDP_SEND_FILES: usize = 4044;
+pub const CTX_TAB_RDP_TRANSFER_FOLDER: usize = 4045;
 /// The new-tab menu's Remote Desktop > saved groups: CTX_RDP_SAVED_GROUP_BASE
 /// + the line's index in `rdp-groups.txt`.
 pub const CTX_RDP_SAVED_GROUP_BASE: usize = 4600;

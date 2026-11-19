@@ -8060,6 +8060,12 @@ pub const Host = struct {
             _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_TAB_RDP_STATUS, std.unicode.utf8ToUtf16LeStringLiteral("Server Status (CPU, Memory, Disks)..."));
             // The connection as a file mstsc.exe opens (no password in it).
             _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_TAB_RDP_EXPORT, std.unicode.utf8ToUtf16LeStringLiteral("Export to Remote Desktop File (.rdp)..."));
+            // Files for the server, through the session's shared folder.
+            const shares = if (tab_surface) |surface| surface.rdpSharesTransfer() else false;
+            if (shares) {
+                _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_TAB_RDP_SEND_FILES, std.unicode.utf8ToUtf16LeStringLiteral("Send Files to Server..."));
+                _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_TAB_RDP_TRANSFER_FOLDER, std.unicode.utf8ToUtf16LeStringLiteral("Open Transfer Folder"));
+            }
             // Add to Group: a new group's tab, or one already open.
             if (sys.CreatePopupMenu()) |group_menu| {
                 _ = sys.AppendMenuW(group_menu, c.MF_STRING, c.CTX_TAB_RDP_GROUP_NEW, std.unicode.utf8ToUtf16LeStringLiteral("New Group"));
@@ -8163,6 +8169,15 @@ pub const Host = struct {
                 c.CTX_TAB_RDP_EXPORT => {
                     // A modal file dialog: the Host may be gone after it.
                     surface.exportRdpFile();
+                    return true;
+                },
+                c.CTX_TAB_RDP_SEND_FILES => {
+                    // A modal file dialog: the Host may be gone after it.
+                    surface.sendRdpFiles();
+                    return true;
+                },
+                c.CTX_TAB_RDP_TRANSFER_FOLDER => {
+                    surface.openRdpTransferFolder();
                     return true;
                 },
                 c.CTX_TAB_RDP_RECONNECT => {

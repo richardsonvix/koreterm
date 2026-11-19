@@ -99,6 +99,77 @@ pub fn pickFileWith(owner: ?HWND, buf: []u16, filter: LPCWSTR, title: LPCWSTR) ?
     return buf[0..len :0];
 }
 
+const OFN_ALLOWMULTISELECT: DWORD = 0x200;
+
+/// The files the person picked (several allowed), as UTF-8 paths owned by
+/// `alloc` (free each, then the slice), or null when they cancelled.
+/// `buf` holds the dialog's answer while it runs.
+pub fn pickFiles(alloc: std.mem.Allocator, owner: ?HWND, buf: []u16, title: LPCWSTR) ?[][]u8 {
+    std.debug.assert(buf.len > 2);
+    buf[0] = 0;
+    var ofn: OPENFILENAMEW = std.mem.zeroes(OPENFILENAMEW);
+    ofn.lStructSize = @sizeOf(OPENFILENAMEW);
+    ofn.hwndOwner = owner;
+    ofn.lpstrFilter = L("All files (*.*)\x00*.*\x00");
+    ofn.nFilterIndex = 1;
+    ofn.lpstrFile = buf.ptr;
+    ofn.nMaxFile = @intCast(@min(buf.len, std.math.maxInt(DWORD)));
+    ofn.lpstrTitle = title;
+    ofn.Flags = OFN_EXPLORER | OFN_ALLOWMULTISELECT | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY | OFN_NOCHANGEDIR;
+    if (GetOpenFileNameW(&ofn) == 0) return null;
+    return splitPicked(alloc, buf) catch null;
+}
+
+/// A multi-select answer as paths: `dir\0name\0name\0\0` for several
+/// files, `path\0\0` for one.
+pub fn splitPicked(alloc: std.mem.Allocator, block: []const u16) ![][]u8 {
+    var parts: std.ArrayListUnmanaged([]const u16) = .empty;
+    defer parts.deinit(alloc);
+    var start: usize = 0;
+    var i: usize = 0;
+    while (i < block.len) : (i += 1) {
+        if (block[i] != 0) continue;
+        if (i == start) break;
+        try parts.append(alloc, block[start..i]);
+        start = i + 1;
+    }
+    var out: std.ArrayListUnmanaged([]u8) = .empty;
+    errdefer {
+        for (out.items) |path| alloc.free(path);
+        out.deinit(alloc);
+    }
+    if (parts.items.len == 1) {
+        try out.append(alloc, try std.unicode.wtf16LeToWtf8Alloc(alloc, parts.items[0]));
+    } else if (parts.items.len > 1) {
+        const dir = try std.unicode.wtf16LeToWtf8Alloc(alloc, parts.items[0]);
+        defer alloc.free(dir);
+        for (parts.items[1..]) |name_w| {
+            const name = try std.unicode.wtf16LeToWtf8Alloc(alloc, name_w);
+            defer alloc.free(name);
+            try out.append(alloc, try std.fs.path.join(alloc, &.{ dir, name }));
+        }
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+test "splitPicked: one path, or a folder and its names" {
+    const alloc = std.testing.allocator;
+    const one = try splitPicked(alloc, L("C:\\a\\b.txt\x00\x00"));
+    defer {
+        for (one) |p| alloc.free(p);
+        alloc.free(one);
+    }
+    try std.testing.expectEqual(@as(usize, 1), one.len);
+    try std.testing.expectEqualStrings("C:\\a\\b.txt", one[0]);
+    const many = try splitPicked(alloc, L("C:\\a\x00x.txt\x00y.txt\x00\x00"));
+    defer {
+        for (many) |p| alloc.free(p);
+        alloc.free(many);
+    }
+    try std.testing.expectEqual(@as(usize, 2), many.len);
+    try std.testing.expectEqualStrings("C:\\a\\y.txt", many[1]);
+}
+
 const OFN_OVERWRITEPROMPT: DWORD = 0x2;
 extern "comdlg32" fn GetSaveFileNameW(ofn: *OPENFILENAMEW) callconv(.winapi) BOOL;
 

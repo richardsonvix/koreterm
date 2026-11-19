@@ -5,9 +5,9 @@
 //!
 //! What goes in: the server and port, the user name kept for the profile,
 //! and its quality settings (`terminals_import.RdpOptions`, each null one
-//! taken from the config's `rdp-*` keys). The password never goes in: a
-//! `.rdp` file can only hold it encrypted for this Windows account
-//! (`password 51:b:`), so mstsc.exe asks for it.
+//! taken from the config's `rdp-*` keys), and the kept password as
+//! `password 51:b:` (`profile_credentials.rdpFilePassword`: DPAPI, so only
+//! this Windows account can use it; anywhere else mstsc.exe asks for it).
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -38,9 +38,10 @@ pub const Defaults = struct {
 };
 
 /// The lines of the `.rdp` file of `connection`, signed in as `user`
-/// (empty for none), as UTF-8 with CRLF line ends. A CR or LF in a value
-/// is dropped: it would start a line of its own.
-pub fn write(writer: *std.Io.Writer, connection: terminals_import.Connection, user: []const u8, defaults: Defaults) std.Io.Writer.Error!void {
+/// (empty for none), with `password_hex` (`password 51:b:`'s value, null
+/// for none), as UTF-8 with CRLF line ends. A CR or LF in a value is
+/// dropped: it would start a line of its own.
+pub fn write(writer: *std.Io.Writer, connection: terminals_import.Connection, user: []const u8, password_hex: ?[]const u8, defaults: Defaults) std.Io.Writer.Error!void {
     const options = connection.rdp;
     const colors = options.colors orelse defaults.colors;
     const compression = options.compression orelse defaults.compression;
@@ -93,6 +94,11 @@ pub fn write(writer: *std.Io.Writer, connection: terminals_import.Connection, us
         try value(writer, user);
         try writer.writeAll("\r\n");
     }
+    if (password_hex) |hex| if (hex.len != 0) {
+        try writer.writeAll("password 51:b:");
+        try value(writer, hex);
+        try writer.writeAll("\r\n");
+    };
 }
 
 fn line(writer: *std.Io.Writer, comptime text: []const u8) std.Io.Writer.Error!void {
@@ -105,10 +111,10 @@ fn value(writer: *std.Io.Writer, text: []const u8) std.Io.Writer.Error!void {
 
 /// The file's bytes: `write`'s text as UTF-16 LE after a BOM, as mstsc.exe
 /// saves it. Owned by `alloc`.
-pub fn encode(a: Allocator, connection: terminals_import.Connection, user: []const u8, defaults: Defaults) Allocator.Error![]u8 {
+pub fn encode(a: Allocator, connection: terminals_import.Connection, user: []const u8, password_hex: ?[]const u8, defaults: Defaults) Allocator.Error![]u8 {
     var out: std.Io.Writer.Allocating = .init(a);
     defer out.deinit();
-    write(&out.writer, connection, user, defaults) catch return error.OutOfMemory;
+    write(&out.writer, connection, user, password_hex, defaults) catch return error.OutOfMemory;
     const wide = std.unicode.wtf8ToWtf16LeAlloc(a, out.written()) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         // Not WTF-8: each byte stands for itself.
@@ -196,7 +202,7 @@ test "write: server, port, user and the connection's own settings" {
         .server = "srv.example",
         .port = 5006,
         .rdp = .{ .colors = .@"16", .compression = false, .experience = .fast, .trust_certificates = false },
-    }, "DOMAIN\\ana", .{});
+    }, "DOMAIN\\ana", null, .{});
     const text = out.written();
     try std.testing.expect(std.mem.indexOf(u8, text, "full address:s:srv.example:5006\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "username:s:DOMAIN\\ana\r\n") != null);
@@ -211,26 +217,27 @@ test "write: server, port, user and the connection's own settings" {
 test "write: defaults fill what the connection leaves out; 3389 is not written" {
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
-    try write(&out.writer, .{ .protocol = .rdp, .server = "10.0.0.5", .port = 3389 }, "", .{ .colors = .@"24", .experience = .rich });
+    try write(&out.writer, .{ .protocol = .rdp, .server = "10.0.0.5", .port = 3389 }, "", "0A1B", .{ .colors = .@"24", .experience = .rich });
     const text = out.written();
     try std.testing.expect(std.mem.indexOf(u8, text, "full address:s:10.0.0.5\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "session bpp:i:24\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "authentication level:i:0\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "disable wallpaper:i:0\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "username:") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "password 51:b:0A1B\r\n") != null);
 }
 
 test "write: IPv6 takes brackets before a port, and a newline in a value is dropped" {
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
-    try write(&out.writer, .{ .protocol = .rdp, .server = "fe80::1", .port = 4000 }, "a\r\nfull address:s:evil", .{});
+    try write(&out.writer, .{ .protocol = .rdp, .server = "fe80::1", .port = 4000 }, "a\r\nfull address:s:evil", null, .{});
     const text = out.written();
     try std.testing.expect(std.mem.indexOf(u8, text, "full address:s:[fe80::1]:4000\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "\r\nfull address:s:evil") == null);
 }
 
 test "encode: UTF-16 LE after a BOM" {
-    const bytes = try encode(std.testing.allocator, .{ .protocol = .rdp, .server = "sé", .port = 3389 }, "", .{});
+    const bytes = try encode(std.testing.allocator, .{ .protocol = .rdp, .server = "sé", .port = 3389 }, "", null, .{});
     defer std.testing.allocator.free(bytes);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0xFF, 0xFE }, bytes[0..2]);
     try std.testing.expect(bytes.len % 2 == 0);

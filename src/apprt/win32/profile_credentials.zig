@@ -214,6 +214,48 @@ fn fileStore(id: []const u8, user: []const u8, password: []const u8) Error!void 
     file.writeAll(blob) catch return error.Unexpected;
 }
 
+/// `password` (UTF-8) as a `.rdp` file's `password 51:b:` value: the DPAPI
+/// blob of its UTF-16 LE text (no NUL), in upper-case hex, as mstsc.exe
+/// saves it. Only this Windows account can decrypt it, so the file signs in
+/// by itself only for this user on this PC. Owned by `alloc`.
+pub fn rdpFilePassword(alloc: Allocator, password: []const u8) Error![]u8 {
+    if (password.len > max_password_len) return error.TooLong;
+    const wide = std.unicode.wtf8ToWtf16LeAlloc(alloc, password) catch return error.Unexpected;
+    defer {
+        @memset(wide, 0);
+        alloc.free(wide);
+    }
+    const bytes = std.mem.sliceAsBytes(wide);
+    const in: DATA_BLOB = .{ .cbData = @intCast(bytes.len), .pbData = bytes.ptr };
+    var out: DATA_BLOB = .{ .cbData = 0, .pbData = null };
+    if (CryptProtectData(&in, std.unicode.utf8ToUtf16LeStringLiteral("psw"), null, null, null, CRYPTPROTECT_UI_FORBIDDEN, &out) == 0) return error.Unexpected;
+    defer _ = LocalFree(out.pbData);
+    const blob = (out.pbData orelse return error.Unexpected)[0..out.cbData];
+    const hex = alloc.alloc(u8, blob.len * 2) catch return error.Unexpected;
+    const digits = "0123456789ABCDEF";
+    for (blob, 0..) |byte, i| {
+        hex[i * 2] = digits[byte >> 4];
+        hex[i * 2 + 1] = digits[byte & 0x0F];
+    }
+    return hex;
+}
+
+test "rdpFilePassword: hex of a DPAPI blob that opens to the UTF-16 password" {
+    const alloc = std.testing.allocator;
+    const hex = try rdpFilePassword(alloc, "sé");
+    defer alloc.free(hex);
+    try std.testing.expect(hex.len % 2 == 0 and hex.len > 0);
+    for (hex) |c| try std.testing.expect(std.ascii.isDigit(c) or (c >= 'A' and c <= 'F'));
+    const blob = try alloc.alloc(u8, hex.len / 2);
+    defer alloc.free(blob);
+    _ = try std.fmt.hexToBytes(blob, hex);
+    const in: DATA_BLOB = .{ .cbData = @intCast(blob.len), .pbData = blob.ptr };
+    var out: DATA_BLOB = .{ .cbData = 0, .pbData = null };
+    try std.testing.expect(CryptUnprotectData(&in, null, null, null, null, CRYPTPROTECT_UI_FORBIDDEN, &out) != 0);
+    defer _ = LocalFree(out.pbData);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 's', 0, 0xE9, 0 }, out.pbData.?[0..out.cbData]);
+}
+
 fn fileReadEntry(alloc: Allocator, id: []const u8) Allocator.Error!?Entry {
     const path = (try filePath(alloc, id)) orelse return null;
     defer alloc.free(path);

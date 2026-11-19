@@ -155,7 +155,8 @@ test "elevation keeps the account unless a standard user's token is elevated" {
 }
 
 /// Whether an elevated process must stay out of the ordinary user's session
-/// state. Only a genuine full split token does: a UAC-off machine and the
+/// state. Such a process keeps its own instead, in an admin-only folder
+/// (`win32/elevated_session.zig`). Only a genuine full split token does: a UAC-off machine and the
 /// built-in Administrator run elevated with the default elevation type and
 /// own the same session file the desktop uses, so they keep persistence.
 ///

@@ -175,6 +175,7 @@ const tab_capture = @import("tab_capture.zig");
 const profile_credentials = @import("profile_credentials.zig");
 const rdp_file = @import("rdp_file.zig");
 const terminals_dialog = @import("terminals_import_dialog.zig");
+const rdp_transfer = @import("rdp_transfer.zig");
 const writeImeWindowFormsTrace = win32.writeImeWindowFormsTrace;
 
 // Test dependencies.
@@ -4228,10 +4229,21 @@ pub const Surface = struct {
         }
         var rect: RECT = undefined;
         if (sys.GetClientRect(hwnd, &rect) == 0) rect = .{ .left = 0, .top = 0, .right = 800, .bottom = 600 };
+        // The connection's transfer folder, shared with the session when
+        // it asks for one (`/transfer:on`).
+        const transfer_dir: ?[]u8 = if (target.rdp.transfer)
+            rdp_transfer.folder(alloc, profile_id, target.server, target.port) catch |err| dir: {
+                log.warn("rdp transfer folder unavailable err={}", .{err});
+                break :dir null;
+            }
+        else
+            null;
+        defer if (transfer_dir) |dir| alloc.free(dir);
         self.rdp_pane = rdp_pane_mod.Pane.create(alloc, hwnd, target, .{
             .profile_id = profile_id,
             .user = if (kept) |entry| entry.user else target.user,
             .password = if (kept) |entry| entry.password else null,
+            .transfer_dir = transfer_dir,
         }, rect.right, rect.bottom, rdpOptions(config, target), self.rdpEvents());
         if (self.rdp_pane == null) self.showRdpNotice("Remote Desktop could not start: this Windows has no Remote Desktop control koreterm can host.");
     }
@@ -4627,8 +4639,8 @@ pub const Surface = struct {
     /// The tab menu's "Export to Remote Desktop File (.rdp)...": the tab's
     /// connection, with the user name its profile keeps and the config's
     /// quality settings for what the connection leaves at default, as a
-    /// `.rdp` file where the person picks (`rdp_file`). The password stays
-    /// out: mstsc.exe asks for it. Nothing typed is logged.
+    /// `.rdp` file where the person picks (`rdp_file`). With the kept
+    /// password as `password 51:b:` (DPAPI). Nothing typed is logged.
     pub fn exportRdpFile(self: *Surface) void {
         const alloc = self.app.core_app.alloc;
         var arena: std.heap.ArenaAllocator = .init(alloc);
@@ -4643,12 +4655,14 @@ pub const Surface = struct {
         const config = &self.app.config;
         var name: []const u8 = self.effectiveTitle() orelse "";
         var user: []const u8 = found.user;
+        var password_hex: ?[]const u8 = null;
         for (config.@"profile-command".entries.items) |entry| {
             if (entry.removed) continue;
             const other = rdp_pane_mod.targetOf(entry.value) orelse continue;
             if (other.port != target.port or !std.ascii.eqlIgnoreCase(other.server, target.server)) continue;
             if (config.@"profile-name".get(entry.id)) |profile_name| name = profile_name;
             if (profile_credentials.readEntry(a, entry.id) catch null) |kept| {
+                if (kept.password.len != 0) password_hex = profile_credentials.rdpFilePassword(a, kept.password) catch null;
                 @memset(kept.password, 0);
                 if (kept.user.len != 0) user = kept.user;
             }
@@ -4656,7 +4670,7 @@ pub const Surface = struct {
         }
         name = a.dupe(u8, name) catch return;
         user = a.dupe(u8, user) catch return;
-        const bytes = rdp_file.encode(a, target, user, rdp_file.Defaults.of(config)) catch return;
+        const bytes = rdp_file.encode(a, target, user, password_hex, rdp_file.Defaults.of(config)) catch return;
         var name_buf: [128]u16 = undefined;
         const default_name = rdp_file.fileName(&name_buf, name, target.server);
         const path_buf = a.alloc(u16, 32768) catch return;
@@ -4672,7 +4686,54 @@ pub const Surface = struct {
             log.warn("rdp file export failed err={}", .{err});
             return self.showRdpNotice("The Remote Desktop file could not be written.");
         };
-        self.showRdpNotice("Exported the connection to a Remote Desktop file. It holds no password: Remote Desktop asks for it when the file is opened.");
+        self.showRdpNotice(if (password_hex != null)
+            "Exported the connection to a Remote Desktop file, with its password (encrypted: it signs in by itself only for this Windows user on this PC)."
+        else
+            "Exported the connection to a Remote Desktop file. No password is kept for it: Remote Desktop asks for it when the file is opened.");
+    }
+
+    // --- Files for the server (`rdp_transfer`) ----------------------------
+
+    /// Whether this tab's session shares a transfer folder.
+    pub fn rdpSharesTransfer(self: *const Surface) bool {
+        const pane = self.rdp_pane orelse return false;
+        return pane.transfer() != null;
+    }
+
+    /// The tab menu's "Send Files to Server...": the picked files go into
+    /// the connection's transfer folder, which the session shares, so they
+    /// are on the server at once without the session being used. A banner
+    /// says where to find them there.
+    pub fn sendRdpFiles(self: *Surface) void {
+        const pane = self.rdp_pane orelse return;
+        const shared = pane.transfer() orelse return;
+        const alloc = self.app.core_app.alloc;
+        const buf = alloc.alloc(u16, 64 * 1024) catch return;
+        defer alloc.free(buf);
+        const picked = terminals_dialog.pickFiles(alloc, self.windowHwnd(), buf, std.unicode.utf8ToUtf16LeStringLiteral("Send files to the server")) orelse return;
+        defer {
+            for (picked) |path| alloc.free(path);
+            alloc.free(picked);
+        }
+        // The dialog was modal: the session may have ended meanwhile.
+        const now = (self.rdp_pane orelse return).transfer() orelse return;
+        const copied = rdp_transfer.copyInto(alloc, now.dir, picked);
+        var msg: [512]u8 = undefined;
+        const text = std.fmt.bufPrint(&msg, "Sent {d} of {d} file{s}: on the server in \\\\tsclient\\{c} (open it from Explorer or Run there; it is this PC's transfer folder, reachable while this tab is connected).", .{
+            copied,
+            picked.len,
+            if (picked.len == 1) "" else "s",
+            shared.letter,
+        }) catch return;
+        self.showRdpNotice(text);
+    }
+
+    /// The tab menu's "Open Transfer Folder": the folder on this PC, to drop
+    /// files into or see what is there.
+    pub fn openRdpTransferFolder(self: *Surface) void {
+        const pane = self.rdp_pane orelse return;
+        const shared = pane.transfer() orelse return;
+        self.app.openOwnFolder(shared.dir) catch |err| log.warn("rdp transfer folder open failed err={}", .{err});
     }
 
     // --- Snapshot and recording of the tab (`tab_capture`) ---------------

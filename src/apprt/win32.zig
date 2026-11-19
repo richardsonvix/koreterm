@@ -434,6 +434,8 @@ test {
     _ = @import("win32/rdp_command_dialog.zig");
     _ = @import("win32/rdp_connection_dialog.zig");
     _ = @import("win32/rdp_file.zig");
+    _ = @import("win32/elevated_session.zig");
+    _ = @import("win32/rdp_transfer.zig");
     _ = @import("win32/preset_dialog.zig");
     _ = @import("win32/rdp_group.zig");
     _ = @import("win32/profile_dialog.zig");
@@ -2231,12 +2233,13 @@ pub fn warnPortableIgnoredLocalData(alloc: Allocator) void {
     );
 }
 
-/// `session_state_excluded` is the elevation exclusion: such a process stays
-/// out of the saved session, so it never sets one aside either.
-pub fn beginRecoveryStartup(alloc: Allocator, session_state_excluded: bool) RecoveryStartup {
+/// `session_file` is the session this process owns, under the data folder
+/// (an elevated one keeps its own, `elevated_session.file_name`); null for
+/// a process that keeps none, so it never sets one aside either.
+pub fn beginRecoveryStartup(alloc: Allocator, session_file: ?[]const u8) RecoveryStartup {
     const path = localAppDataPathAlloc(alloc, "startup-attempts.json") orelse return .{};
     defer alloc.free(path);
-    const session_path = if (session_state_excluded) null else localAppDataPathAlloc(alloc, "session-state.json");
+    const session_path = if (session_file) |name| localAppDataPathAlloc(alloc, name) else null;
     defer if (session_path) |value| alloc.free(value);
     return beginRecoveryStartupAtPath(alloc, path, session_path, unixMillis(), recovery_ledger_lock_wait_ms);
 }

@@ -176,6 +176,7 @@ const sendNewTabIpc = win32.sendNewTabIpc;
 const sendNewWindowIpc = win32.sendNewWindowIpc;
 const sendPerformActionIpc = win32.sendPerformActionIpc;
 const session_module = @import("session.zig");
+const elevated_session = @import("elevated_session.zig");
 const setWindowData = child_window.setWindowData;
 const setWindowIcon = win32.setWindowIcon;
 const settingsAppIconThunk = win32.settingsAppIconThunk;
@@ -694,6 +695,12 @@ pub const App = struct {
     /// elevated but default elevation type, so they keep normal session
     /// persistence.
     session_state_excluded_for_elevation: bool = false,
+    /// A genuine full split token (or an unknown elevation type) keeps its
+    /// own session, `elevated_session.file_name`, in a folder only
+    /// administrators may write (`elevated_session.ensureDir`). When that
+    /// folder cannot be made admin-only, `session_state_excluded_for_elevation`
+    /// is set as well and it keeps none.
+    session_state_elevated: bool = false,
     config_revision: u64 = 1,
     /// Set while a config change goes to every pane and then to the app
     /// (`updateCoreConfig`; the palette's theme swap,
@@ -1174,10 +1181,21 @@ pub const App = struct {
                 elevation_type,
             );
         } else false;
+        // Such a process keeps a session of its own, in an admin-only
+        // folder; without one it keeps none.
+        const session_state_elevated = session_state_excluded_for_elevation;
+        const elevated_session_unavailable = session_state_elevated and !embedding_mode and elevated: {
+            const dir = localAppDataPathAlloc(core_app.alloc, elevated_session.dir_name) orelse break :elevated true;
+            defer core_app.alloc.free(dir);
+            break :elevated !elevated_session.ensureDir(dir);
+        };
         const recovery_startup = if (embedding_mode)
             RecoveryStartup{}
         else
-            beginRecoveryStartup(core_app.alloc, session_state_excluded_for_elevation);
+            beginRecoveryStartup(
+                core_app.alloc,
+                if (elevated_session_unavailable) null else if (session_state_elevated) elevated_session.file_name else elevated_session.ordinary_file_name,
+            );
         const safe_mode = opts.safe_mode or recovery_startup.decision != .normal;
         self.* = .{
             .core_app = core_app,
@@ -1191,7 +1209,8 @@ pub const App = struct {
                 break :config config;
             } else try configpkg.Config.load(core_app.alloc),
             .is_elevated = is_elevated,
-            .session_state_excluded_for_elevation = session_state_excluded_for_elevation,
+            .session_state_excluded_for_elevation = elevated_session_unavailable or (session_state_elevated and embedding_mode),
+            .session_state_elevated = session_state_elevated,
             .safe_mode = safe_mode,
             .embedding_mode = embedding_mode,
             .toast_activated = toast_activated,
@@ -1210,7 +1229,7 @@ pub const App = struct {
             self.config.@"window-save-state" != .never)
         {
             log.info(
-                "win32 session state disabled: elevated process whose token is TokenElevationTypeFull (split-token elevated) or whose elevation type could not be queried",
+                "win32 session state disabled: elevated process (TokenElevationTypeFull, or a type that could not be queried) whose admin-only session folder is unavailable",
                 .{},
             );
         }
@@ -1663,6 +1682,9 @@ pub const App = struct {
         // Keep the banner text even without an initial window: every later
         // host receives its own copy when it is created.
         _ = self.reportConfigProblems(&self.config);
+        // An ordinary launch that may restore: say when the last tabs were
+        // an elevated instance's, which only that one restores.
+        if (self.sessionRestoreEligible()) self.noteElevatedSessionSavedLater();
 
         // Armed here, released by `resolveRecoveryStartup` once the ready
         // marker is on disk. Spawning it here would let thread scheduling put
@@ -2181,6 +2203,7 @@ pub const App = struct {
     pub const paletteMruPath = palette_controller.AppControls.paletteMruPath;
 
     pub const sessionStatePath = session_module.sessionStatePath;
+    pub const noteElevatedSessionSavedLater = session_module.noteElevatedSessionSavedLater;
 
     /// Resolve `%LOCALAPPDATA%\koreterm\startup-attempts.json`, the recovery
     /// ledger. Caller frees with `core_app.alloc`.
@@ -8670,6 +8693,12 @@ pub const App = struct {
     /// link from terminal output goes through `openLink`.
     fn openUrl(self: *App, url: []const u8) !void {
         return openWin32Target(self.core_app.alloc, self, url, deferOpenTarget);
+    }
+
+    /// Open a folder koreterm made (a Remote Desktop transfer folder) in
+    /// Explorer, from the message loop like every open.
+    pub fn openOwnFolder(self: *App, path: []const u8) !void {
+        return self.deferOpenTarget(path);
     }
 
     fn deferOpenTarget(self: *App, target: []const u8) !void {

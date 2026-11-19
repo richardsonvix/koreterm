@@ -27,6 +27,7 @@ const win32_session_persistence = runtime.win32_session_persistence;
 const win32_session_state = runtime.win32_session_state;
 const window_state = @import("window_state.zig");
 const rdp_group = @import("rdp_group.zig");
+const elevated_session = @import("elevated_session.zig");
 const windows = runtime.windows;
 const writePersistentFileAlloc = runtime.writePersistentFileAlloc;
 
@@ -264,10 +265,24 @@ pub const SessionOwnerLock = struct {
     }
 };
 
-/// Resolve `%LOCALAPPDATA%\koreterm\session-state.json`. Caller
-/// frees with `core_app.alloc`.
+/// Resolve `%LOCALAPPDATA%\koreterm\session-state.json`, or for an
+/// elevated process its own `elevated\session-state.json`
+/// (`elevated_session`). Caller frees with `core_app.alloc`.
 pub fn sessionStatePath(self: *const App) ?[]u8 {
-    return self.localAppDataPath("session-state.json");
+    return self.localAppDataPath(if (self.session_state_elevated) elevated_session.file_name else elevated_session.ordinary_file_name);
+}
+
+/// An ordinary instance's startup note: the last tabs were saved by an
+/// elevated instance (`elevated_session.savedLater`), so they are not
+/// restored here.
+pub fn noteElevatedSessionSavedLater(self: *App) void {
+    if (self.is_elevated or self.embedding_mode) return;
+    const elevated = self.localAppDataPath(elevated_session.file_name) orelse return;
+    defer self.core_app.alloc.free(elevated);
+    const ordinary = self.localAppDataPath(elevated_session.ordinary_file_name) orelse return;
+    defer self.core_app.alloc.free(ordinary);
+    if (!elevated_session.savedLater(elevated, ordinary)) return;
+    _ = self.showHostBanner(.app, .info, elevated_session.saved_later_notice) catch false;
 }
 
 pub fn sessionStateEnabled(self: *const App) bool {
@@ -365,6 +380,18 @@ pub fn loadSessionState(self: *App) !?std.json.Parsed(win32_session_state.Sessio
     if (!self.sessionRestoreEligible()) return null;
     const path = self.sessionStatePath() orelse return null;
     defer self.core_app.alloc.free(path);
+    // An elevated session is read only when no medium process could have
+    // written it, through a handle that keeps it as checked until the read
+    // ends (`elevated_session.openChecked`).
+    if (self.session_state_elevated) {
+        std.fs.cwd().access(path, .{}) catch return null;
+        const checked = elevated_session.openChecked(path) orelse {
+            self.session_state_left_alone = true;
+            return null;
+        };
+        defer windows.CloseHandle(checked);
+        return self.loadSessionStateAt(path);
+    }
     return self.loadSessionStateAt(path);
 }
 

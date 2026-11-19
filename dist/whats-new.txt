@@ -1,3 +1,32 @@
+koreterm 1.3.152
+
+- An exported Remote Desktop file (.rdp) now carries the connection's
+  kept password, encrypted the way mstsc.exe saves it: opened by the same
+  Windows user on the same PC, it signs in without asking. Anywhere else
+  Remote Desktop still asks for the password.
+- koreterm running as administrator now saves its tabs (names, folders,
+  Remote Desktop tabs) and brings them back at its next start as
+  administrator. It keeps them apart from the normal instance's, in a
+  folder only administrators can change. A normal start whose last saved
+  tabs were the administrator's says so, since it does not restore them.
+- Putting Remote Desktop tabs in a group, or taking one out, no longer
+  disconnects and reconnects the session to change its quality. A server
+  that hands a disconnected session back to its console (as the robots'
+  agent does) ended the session and the robots in it. Each session keeps
+  its own colors and quality in the group; only picking the group's
+  colors from its menu reconnects them.
+- A session that reconnects to take new settings waits for the old
+  connection to close first, and tries again (up to 3 times) instead of
+  ending at once.
+- Send Files to Server: a Remote Desktop connection can share a transfer
+  folder ("Share a transfer folder" in its window). Its tab menu then has
+  "Send Files to Server...", which puts the picked files where the server
+  sees them at once, as \\tsclient\<letter>, without using the session,
+  and "Open Transfer Folder". The folder is on this PC
+  (%USERPROFILE%\koreterm-transfer\<connection>): the server reaches it
+  while the tab is connected. Only that folder is shared, never a drive.
+  Turning it on takes effect the next time the tab connects.
+
 koreterm 1.3.151
 
 - Export to Remote Desktop File (.rdp) works in a Remote Desktop tab that

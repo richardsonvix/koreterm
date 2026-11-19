@@ -515,7 +515,8 @@ that govern each symbol you change, or that none does.
 - [app-lifecycle.md](docs/agents/log/app-lifecycle.md): `App.init` and
   startup stalls, a cold `--launch-layout` (`App.startup_launch_layout`,
   `forgetLaunchLayout`), startup attempts and safe mode, session state
-  (capture, restore, owner lock and quarantine: `win32/session.zig`) and
+  (capture, restore, owner lock and quarantine: `win32/session.zig`; an
+  elevated instance's own admin-only session: `win32/elevated_session.zig`) and
   state-file schemas, IPC and single instance (`win32/ipc_server.zig`), AUMID
   and portable identity, the jump list, toasts and desktop notifications
   (`win32/notifications.zig`: their tab attribution, tags and history

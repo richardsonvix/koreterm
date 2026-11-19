@@ -24,6 +24,7 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 
 const win32_types = @import("../win32_types.zig");
+const rdp_transfer = @import("rdp_transfer.zig");
 const terminals_import = @import("terminals_import.zig");
 const profile_credentials = @import("profile_credentials.zig");
 const clipboard_write = @import("clipboard_write.zig");
@@ -188,6 +189,67 @@ const IID_NULL: GUID = std.mem.zeroes(GUID);
 const IID_IDispatch: GUID = .{ .Data1 = 0x00020400, .Data2 = 0, .Data3 = 0, .Data4 = .{ 0xC0, 0, 0, 0, 0, 0, 0, 0x46 } };
 const IID_IMsTscNonScriptable: GUID = .{ .Data1 = 0xC1E6743A, .Data2 = 0x41C1, .Data3 = 0x4A74, .Data4 = .{ 0x83, 0x2A, 0x0D, 0xD0, 0x6C, 0x1C, 0x7A, 0x0E } };
 const IID_IMsRdpClientNonScriptable: GUID = .{ .Data1 = 0x2F079C4C, .Data2 = 0x87B2, .Data3 = 0x4AFD, .Data4 = .{ 0x97, 0xAB, 0x20, 0xCD, 0xB4, 0x30, 0x38, 0xAE } };
+const IID_IMsRdpClientNonScriptable3: GUID = .{ .Data1 = 0xB3378D90, .Data2 = 0x0728, .Data3 = 0x45C7, .Data4 = .{ 0x8E, 0xD7, 0xB6, 0x15, 0x9F, 0xB9, 0x22, 0x19 } };
+
+/// Method `index` of a COM object's vtable, as `F`.
+fn slot(comptime F: type, obj: *anyopaque, index: usize) F {
+    const vtbl: *const [*]const *const anyopaque = @ptrCast(@alignCast(obj));
+    return @ptrCast(vtbl.*[index]);
+}
+
+fn releaseCom(obj: *anyopaque) void {
+    _ = slot(*const fn (*anyopaque) callconv(.winapi) u32, obj, 2)(obj);
+}
+
+/// Redirect drive `letter` alone through the control's DriveCollection
+/// (see `Pane.shareTransfer` for the slots). False when the drive is not
+/// listed or the control refuses.
+fn redirectDrive(unknown: *IUnknown, letter: u8) bool {
+    const Hr1 = *const fn (*anyopaque, i16) callconv(.winapi) HRESULT;
+    const GetPtr = *const fn (*anyopaque, *?*anyopaque) callconv(.winapi) HRESULT;
+    var raw: ?*anyopaque = null;
+    if (!succeeded(unknown.vtbl.QueryInterface(unknown, &IID_IMsRdpClientNonScriptable3, &raw)) or raw == null) return false;
+    const ns = raw.?;
+    defer releaseCom(ns);
+    // No "this remote computer can use your drives" prompt: the person chose
+    // the folder in the connection's window.
+    _ = slot(Hr1, ns, 17)(ns, 0);
+    var coll_raw: ?*anyopaque = null;
+    if (!succeeded(slot(GetPtr, ns, 30)(ns, &coll_raw)) or coll_raw == null) return false;
+    const coll = coll_raw.?;
+    defer releaseCom(coll);
+    _ = slot(Hr1, coll, 3)(coll, 0);
+    var count: u32 = 0;
+    if (!succeeded(slot(*const fn (*anyopaque, *u32) callconv(.winapi) HRESULT, coll, 5)(coll, &count))) return false;
+    var shared = false;
+    var i: u32 = 0;
+    while (i < count) : (i += 1) {
+        var drive_raw: ?*anyopaque = null;
+        if (!succeeded(slot(*const fn (*anyopaque, u32, *?*anyopaque) callconv(.winapi) HRESULT, coll, 4)(coll, i, &drive_raw)) or drive_raw == null) continue;
+        const drive = drive_raw.?;
+        defer releaseCom(drive);
+        var name: ?[*:0]u16 = null;
+        if (!succeeded(slot(*const fn (*anyopaque, *?[*:0]u16) callconv(.winapi) HRESULT, drive, 3)(drive, &name))) continue;
+        defer SysFreeString(name);
+        const ours = if (name) |text| namesDrive(std.mem.span(text), letter) else false;
+        _ = slot(Hr1, drive, 4)(drive, if (ours) -1 else 0);
+        if (ours) shared = true;
+    }
+    return shared;
+}
+
+/// Whether a DriveCollection name (`T:`, or `Label (T:)`) is drive `letter`.
+fn namesDrive(name: []const u16, letter: u8) bool {
+    var i: usize = 0;
+    while (i + 1 < name.len) : (i += 1) {
+        if (name[i + 1] != ':') continue;
+        const at = name[i];
+        if (at != letter and at != std.ascii.toLower(letter)) continue;
+        // Not the tail of a longer word: `T:` alone, or after `(` or a space.
+        if (i == 0 or name[i - 1] == '(' or name[i - 1] == ' ') return true;
+    }
+    return false;
+}
 
 /// The newest Remote Desktop clients first (`MsTscAx.MsTscAx.<n>`, the
 /// not-safe-for-scripting classes, which take a password); the
@@ -439,6 +501,9 @@ pub const Login = struct {
     user: []const u8 = "",
     /// Null when none is kept: the pane asks first.
     password: ?[]const u8 = null,
+    /// The connection's transfer folder on this PC (`rdp_transfer.folder`),
+    /// shared with the session as a drive; null for none.
+    transfer_dir: ?[]const u8 = null,
 };
 
 pub const Options = struct {
@@ -466,6 +531,18 @@ pub const Options = struct {
     pub fn needsReconnect(self: Options, other: Options) bool {
         return self.colors != other.colors or self.compression != other.compression or
             self.experience != other.experience or self.audio != other.audio;
+    }
+
+    /// `self`, but with what only a reconnect could change (`needsReconnect`)
+    /// kept as in `current`: options a session can take without being
+    /// disconnected.
+    pub fn withoutReconnect(self: Options, current: Options) Options {
+        var out = self;
+        out.colors = current.colors;
+        out.compression = current.compression;
+        out.experience = current.experience;
+        out.audio = current.audio;
+        return out;
     }
 };
 
@@ -574,6 +651,14 @@ const persistent_pause_minutes = [_]u32{ 5, 15, 30, 60 };
 /// Polls before the one automatic retry of a first connection that never
 /// came up (`first_retry`).
 const first_retry_delay_polls: u32 = 3;
+/// Polls (seconds) a Disconnect for new options gets to wind down before
+/// the session connects again (`Pane.applyOptions`).
+const options_settle_polls: u32 = 3;
+/// Polls a connect for new options gets to come up before it is tried again.
+const options_wait_polls: u32 = 20;
+/// Connects for new options before the session ends as any drop would: each
+/// is a sign-in.
+const max_options_attempts: u32 = 3;
 
 /// `ExtendedDisconnectReason` values no reconnect can mend: the session was
 /// ended on purpose (1 and 2 by this app, 12 the user signed out), taken by
@@ -651,6 +736,11 @@ pub const Pane = struct {
     options: Options,
     /// Owned copies of the login, the password zeroed when freed.
     profile_id: ?[]u8 = null,
+    /// The transfer folder shared with the session, and the drive letter it
+    /// has in this logon session (`rdp_transfer.mapDrive`): on the server it
+    /// is `\\tsclient\<letter>`. Null when the connection shares none.
+    transfer_dir: ?[]u8 = null,
+    transfer_letter: ?u8 = null,
     /// The server, without its port: PowerShell remoting's computer name.
     server: []u8 = &.{},
     /// The port it connects to, for the tab's hint.
@@ -704,6 +794,16 @@ pub const Pane = struct {
     /// The session is being connected again to take new options
     /// (`applyOptions`): the poll connects it, not ends it.
     options_reconnect: bool = false,
+    /// Polls left in which a session connecting again for new options may
+    /// still show no connection without ending: the Disconnect before it
+    /// winds down late, and its last report (1, ours; 5, replaced by the new
+    /// sign-in) is not this connection's end. Measured 2026-11-19: tabs
+    /// that left a group ended 4 to 7 s after "disconnect to take new
+    /// options" with reason 5 or 1.
+    options_wait: u32 = 0,
+    /// Connects made for new options since the session was last up; after
+    /// `max_options_attempts` it ends as any drop would.
+    options_attempts: u32 = 0,
     /// A first connection that never came up was retried once
     /// (`afterDrop`). Set for a pane with no kept password: its retry would
     /// ask again.
@@ -844,11 +944,41 @@ pub const Pane = struct {
             _ = putI4(adv, L("MinutesToIdleTimeout"), 0);
         }
 
+        if (login.transfer_dir) |dir| self.shareTransfer(dir);
         self.writeQuality();
         _ = SetPropW(window, prop_name, self);
         // Connect once the tab is made: the credential prompt is modal.
         _ = SetTimer(window, start_timer, 50, &startTick);
         return self;
+    }
+
+    /// Share `dir`, and only it, with the session: a drive letter for it
+    /// (`rdp_transfer.mapDrive`), then the control redirects that drive
+    /// alone (IMsRdpClientNonScriptable3's DriveCollection). Slots read from
+    /// mstscax.dll's type library on 2026-11-19: DriveCollection 30,
+    /// ShowRedirectionWarningDialog 17; the collection's RescanDrives,
+    /// DriveByIndex, DriveCount 3 to 5; a drive's Name 3 and
+    /// RedirectionState 4.
+    fn shareTransfer(self: *Pane, dir: []const u8) void {
+        if (getDispatch(self.control, L("AdvancedSettings9")) orelse getDispatch(self.control, L("AdvancedSettings2"))) |adv| {
+            defer _ = adv.vtbl.Release(adv);
+            // Every other drive stays on this PC.
+            _ = putBool(adv, L("RedirectDrives"), false);
+        }
+        const letter = rdp_transfer.mapDrive(dir) orelse return;
+        self.transfer_dir = self.alloc.dupe(u8, dir) catch {
+            rdp_transfer.unmapDrive(letter);
+            return;
+        };
+        self.transfer_letter = letter;
+        if (!redirectDrive(self.unknown, letter)) log.warn("rdp pane: the transfer drive could not be shared", .{});
+    }
+
+    /// The transfer folder and its name on the server, when the
+    /// connection shares one.
+    pub fn transfer(self: *const Pane) ?struct { dir: []const u8, letter: u8 } {
+        const dir = self.transfer_dir orelse return null;
+        return .{ .dir = dir, .letter = self.transfer_letter orelse return null };
     }
 
     fn setPassword(self: *Pane, text: []const u8) void {
@@ -1203,6 +1333,8 @@ pub const Pane = struct {
         self.alloc.free(self.user);
         self.alloc.free(self.server);
         if (self.profile_id) |id| self.alloc.free(id);
+        if (self.transfer_letter) |letter| rdp_transfer.unmapDrive(letter);
+        if (self.transfer_dir) |dir| self.alloc.free(dir);
         self.alloc.destroy(self);
     }
 
@@ -1235,6 +1367,8 @@ pub const Pane = struct {
                 self.pauses = 0;
                 self.pause_left = 0;
                 self.first_retry_done = true;
+                self.options_wait = 0;
+                self.options_attempts = 0;
                 if (!self.told_connected) {
                     self.told_connected = true;
                     noteEvent("pane={x} connected", .{@intFromPtr(self)});
@@ -1248,8 +1382,16 @@ pub const Pane = struct {
         // Disconnected to take new options (`applyOptions`): connect again
         // with them, at the size the pane wants now.
         if (self.options_reconnect) {
+            // Let the Disconnect wind down first: a Connect while it still
+            // tears down was ended with the old connection's report.
+            if (self.idle_polls < options_settle_polls) {
+                self.idle_polls += 1;
+                return;
+            }
             self.options_reconnect = false;
             self.idle_polls = 0;
+            self.options_attempts += 1;
+            self.options_wait = options_wait_polls;
             self.writeQuality();
             const wanted = self.wantedDesktop();
             self.desk_w = wanted[0];
@@ -1260,6 +1402,19 @@ pub const Pane = struct {
             log.info("rdp pane: connecting again with new options", .{});
             self.connect();
             return;
+        }
+        // Connecting again for new options: no report of the old
+        // connection ends it. Once the wait is spent it tries again, up to
+        // `max_options_attempts` sign-ins, then ends as any drop would.
+        if (self.options_wait != 0) {
+            self.options_wait -= 1;
+            if (self.options_wait != 0) return;
+            if (self.options_attempts < max_options_attempts) {
+                noteEvent("pane={x} new options: connect attempt={d} did not come up, trying again", .{ @intFromPtr(self), self.options_attempts });
+                self.options_reconnect = true;
+                self.idle_polls = 0;
+                return;
+            }
         }
         // Not connected. A bad server name fails before Connect returns, so
         // a session never under way gets a few polls first.
@@ -1609,4 +1764,21 @@ test "rdp pane: each key batch releases every key it presses, in reverse" {
             try std.testing.expectEqual(key.code, release.code);
         }
     }
+}
+
+test "rdp options: withoutReconnect keeps what only a reconnect changes" {
+    const current: Options = .{ .colors = 32, .compression = false, .experience = .rich, .audio = true, .scaling = .fill };
+    const wanted: Options = .{ .colors = 16, .compression = true, .experience = .fast, .audio = false, .scaling = .proportional };
+    const taken = wanted.withoutReconnect(current);
+    try std.testing.expect(!current.needsReconnect(taken));
+    try std.testing.expectEqual(Scaling.proportional, taken.scaling);
+}
+
+test "namesDrive: a drive's name in the collection" {
+    const L8 = std.unicode.utf8ToUtf16LeStringLiteral;
+    try std.testing.expect(namesDrive(L8("T:"), 'T'));
+    try std.testing.expect(namesDrive(L8("Local Disk (T:)"), 'T'));
+    try std.testing.expect(namesDrive(L8("t:"), 'T'));
+    try std.testing.expect(!namesDrive(L8("Local Disk (C:)"), 'T'));
+    try std.testing.expect(!namesDrive(L8("NET:"), 'T'));
 }

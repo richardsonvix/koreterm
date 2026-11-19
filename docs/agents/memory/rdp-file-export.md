@@ -23,3 +23,7 @@ Same day, also uncompiled (fmt + ast-check only), for 1.3.150:
 - A first connection that never came up retries once (`first_retry_done`), skipped when no password is kept. This explains the user's "placeholder text after a failed first connect".
 - Session restore: `win32_session_state.Pane.rdp_group` (name, colors, profiles), captured by `sessionRdpGroup` and restored in `restoreSessionPane` via `rdp_group.Start{ .from_saved_line = false }`. Adopted RDP tabs get `launch_profile_key = "user:<id>"` in `adoptRdpPane`.
 - Filters to run when a build is asked: `rdp`, `session`, `terminals_import`.
+
+2026-11-19, built into 1.3.152 (filters rdp_file, rdpFilePassword passed): the user asked that the exported .rdp carry the password. `profile_credentials.rdpFilePassword` writes `password 51:b:` as upper-case hex of `CryptProtectData` over the UTF-16 LE password (no NUL, description "psw"), and `rdp_file.write`/`encode` take `password_hex`. It works only for the same Windows user on the same PC. Test filters when a build is asked: `rdp_file`, `rdpFilePassword`. Verify that mstsc.exe signs in without asking.
+
+Same day, open question: tabs CND02/CND03 ended with `ExtendedDisconnectReason` 5 (replaced by another connection) seconds after connecting (rdp-events.log 08:11:50 and 08:11:57), before any reconnect of ours. Ports 5001/5005/5006 are three different machines (certificate CN CND02/CND03/CND01). The user says nobody connects from elsewhere. Not yet explained; the server's LocalSessionManager events 24/25/39/40 would name who took the session.

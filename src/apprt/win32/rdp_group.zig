@@ -86,9 +86,6 @@ const TRANSPARENT: i32 = 1;
 const class_name = L("koreterm.rdp_group");
 const sample_timer: usize = 0x5247; // "RG"
 const sample_ms: u32 = 3000;
-/// The least time between two reconnects the automatic level makes to
-/// lower or raise the colors: each one signs every session in again.
-const color_change_gap_ms: u64 = 60_000;
 
 /// The colors a group asks its sessions for, before the automatic cap.
 pub const Colors = enum(u8) {
@@ -215,7 +212,6 @@ pub const Group = struct {
     cpu_pct: u8 = 0,
     last_cpu_100ns: u64 = 0,
     last_tick_ms: u64 = 0,
-    last_color_change_ms: u64 = 0,
     font: ?*anyopaque = null,
     font_dpi: u32 = 0,
     /// Its tab was closed (it is kept for undo): Add to Group leaves it out.
@@ -307,9 +303,9 @@ pub const Group = struct {
         pane.reparent(self.hwnd, member.events());
         pane.setInteractive(false);
         self.layout();
-        // Joining reconnects once anyway (sound, quality), so its colors
-        // are set now too.
-        self.applyLevel(true);
+        // No reconnect to join (`applyLevel`): the session keeps its
+        // quality and sound until the group's colors are picked.
+        self.applyLevel(false);
         _ = InvalidateRect(self.hwnd, null, 1);
     }
 
@@ -340,7 +336,7 @@ pub const Group = struct {
         };
         pane.setInteractive(false);
         self.layout();
-        self.applyLevel(true);
+        self.applyLevel(false);
         _ = InvalidateRect(self.hwnd, null, 1);
     }
 
@@ -361,7 +357,11 @@ pub const Group = struct {
         pane.setInteractive(true);
         // Its tab's `resize` gives it that tab's size again.
         pane.keepDesktop(false);
-        pane.applyOptions(member.own);
+        // No reconnect: the server may hand a disconnected session back to
+        // its console at once (an agent's tscon), which ends the robots
+        // running in it and refuses the reconnect (reason 5). Measured
+        // 2026-11-19: CND03 ended 7 s after it left its group.
+        pane.applyOptions(member.own.withoutReconnect(pane.options));
         self.hooks.release(self.hooks.ctx, pane, member.label);
         self.freeMember(member);
         self.layout();
@@ -400,23 +400,23 @@ pub const Group = struct {
         };
     }
 
-    /// Give every session the level in force: its options (colors, a
-    /// reconnect) when they changed and
-    /// `colors_now` or the last change is a minute old.
+    /// Give every session the level in force. What needs a reconnect
+    /// (colors, compression, experience, audio) changes only when
+    /// `colors_now`, the person's own pick of colors from the group tab's
+    /// menu: joining, leaving, a session ending or the load never
+    /// disconnects a session. A disconnected session may be handed back to
+    /// the server's console at once (an agent's tscon), which ends what
+    /// runs in it and refuses the reconnect (reason 5); measured
+    /// 2026-11-19 on sessions running FlaUI robots.
     fn applyLevel(self: *Group, colors_now: bool) void {
-        const now = GetTickCount64();
-        var reconnects = false;
         for (self.members.items) |member| {
             const options = self.memberOptions(member.own);
-            if (!member.pane.options.needsReconnect(options)) {
+            if (colors_now or !member.pane.options.needsReconnect(options)) {
                 member.pane.applyOptions(options);
-                continue;
+            } else {
+                member.pane.applyOptions(options.withoutReconnect(member.pane.options));
             }
-            if (!colors_now and now -| self.last_color_change_ms < color_change_gap_ms) continue;
-            member.pane.applyOptions(options);
-            reconnects = true;
         }
-        if (reconnects) self.last_color_change_ms = now;
     }
 
     fn sampleStart(self: *Group) void {
@@ -554,23 +554,17 @@ pub const Group = struct {
         defer _ = SelectObject(hdc, old_font);
         _ = SetBkMode(hdc, TRANSPARENT);
 
-        // The header: what is watched and what the load made of it.
+        // The header: what is watched, and koreterm's load.
         var header = self.headerRect();
         fill(hdc, header, 0x00242424);
         header.left += self.scaled(8);
         var buf: [256]u8 = undefined;
-        const colors_text = switch (self.effectiveColors()) {
-            8 => "256 colors",
-            15, 16 => "65 thousand colors",
-            else => "16 million colors",
-        };
-        const auto = if (self.effectiveColors() < self.colors.bits()) " (lowered automatically for the load)" else "";
-        const header_text = std.fmt.bufPrint(&buf, "{s}: {d} Remote Desktop{s}, watch only. {s}{s}. koreterm CPU {d}%.", .{
+        // Each session keeps its own colors (`applyLevel`), so none are
+        // named here.
+        const header_text = std.fmt.bufPrint(&buf, "{s}: {d} Remote Desktop{s}, watch only. koreterm CPU {d}%.", .{
             self.name,
             self.members.items.len,
             if (self.members.items.len == 1) "" else "s",
-            colors_text,
-            auto,
             self.cpu_pct,
         }) catch "";
         text(hdc, header, header_text, 0x00C8C8C8, 0);
