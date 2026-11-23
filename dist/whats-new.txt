@@ -1,3 +1,18 @@
+koreterm 1.3.154
+
+- A Remote Desktop session in a group now shows its whole desktop,
+  scaled down to fit its cell (Fit all), instead of a part of it. Keep
+  size on its strip gives back the size it had. Changing the size makes
+  the server rearrange the windows open in it.
+- Resting the mouse on a session in a group opens it large, live and
+  watch only, in a window over the grid. A click, Esc, its X or a click
+  elsewhere closes it.
+- A session in a group no longer keeps the keyboard: keys typed in
+  koreterm (the Windows key opened the remote Start menu) stay out of
+  it until Interact.
+- The new-tab menu no longer puts a check mark on the last profile
+  picked: its items are only picked.
+
 koreterm 1.3.153
 
 - A Remote Desktop connection can be made from scratch and copied where

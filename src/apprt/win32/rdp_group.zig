@@ -8,7 +8,9 @@
 //!
 //! A watched session is light: the mouse and keys do not reach it until
 //! Interact, its sound plays nowhere, the visual quality is the fastest,
-//! compression is on, and its desktop is the size of its cell. The colors
+//! compression is on, and its desktop starts at the monitor's size, scaled
+//! down into its cell (Fit all; Keep size on its strip gives back the size
+//! it had). The colors
 //! are the group's choice (256, 65 thousand or 16 million), capped by how
 //! many sessions are watched and by how busy koreterm is: a sample of the
 //! process's CPU every few seconds raises or lowers an automatic level,
@@ -35,6 +37,19 @@ const WPARAM = win32_types.WPARAM;
 const RECT = win32_types.RECT;
 const PAINTSTRUCT = win32_types.PAINTSTRUCT;
 const WNDCLASSEXW = win32_types.WNDCLASSEXW;
+const MONITORINFO = win32_types.MONITORINFO;
+
+const MONITOR_DEFAULTTONEAREST: u32 = 2;
+
+/// winuser.h's TRACKMOUSEEVENT (24 bytes on 64-bit targets, pinned below).
+const TRACKMOUSEEVENT = extern struct {
+    cbSize: u32 = @sizeOf(TRACKMOUSEEVENT),
+    dwFlags: u32,
+    hwndTrack: HWND,
+    dwHoverTime: u32,
+};
+const TME_HOVER: u32 = 0x1;
+const TME_LEAVE: u32 = 0x2;
 
 const L = std.unicode.utf8ToUtf16LeStringLiteral;
 const log = std.log.scoped(.win32_rdp_group);
@@ -55,6 +70,13 @@ extern "user32" fn KillTimer(hwnd: ?HWND, id: usize) callconv(.winapi) BOOL;
 extern "user32" fn SetWindowLongPtrW(hwnd: HWND, index: i32, value: isize) callconv(.winapi) isize;
 extern "user32" fn GetWindowLongPtrW(hwnd: HWND, index: i32) callconv(.winapi) isize;
 extern "user32" fn GetDpiForWindow(hwnd: HWND) callconv(.winapi) UINT;
+extern "user32" fn TrackMouseEvent(track: *TRACKMOUSEEVENT) callconv(.winapi) BOOL;
+extern "user32" fn ShowWindow(hwnd: HWND, cmd: i32) callconv(.winapi) BOOL;
+extern "user32" fn GetAncestor(hwnd: HWND, flags: UINT) callconv(.winapi) ?HWND;
+extern "user32" fn PostMessageW(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(.winapi) BOOL;
+extern "user32" fn SetFocus(hwnd: HWND) callconv(.winapi) ?HWND;
+extern "user32" fn MonitorFromWindow(hwnd: HWND, flags: u32) callconv(.winapi) ?*anyopaque;
+extern "user32" fn GetMonitorInfoW(monitor: *anyopaque, info: *MONITORINFO) callconv(.winapi) BOOL;
 extern "user32" fn LoadCursorW(inst: ?HINSTANCE, name: usize) callconv(.winapi) ?*anyopaque;
 extern "kernel32" fn GetModuleHandleW(name: ?LPCWSTR) callconv(.winapi) ?HINSTANCE;
 extern "kernel32" fn GetCurrentProcess() callconv(.winapi) ?*anyopaque;
@@ -69,6 +91,12 @@ extern "gdi32" fn SetTextColor(hdc: ?*anyopaque, color: u32) callconv(.winapi) u
 extern "gdi32" fn CreateFontW(h: i32, w: i32, esc: i32, orient: i32, weight: i32, italic: u32, underline: u32, strike: u32, charset: u32, out_prec: u32, clip_prec: u32, quality: u32, pitch: u32, face: LPCWSTR) callconv(.winapi) ?*anyopaque;
 
 const WM_DESTROY: UINT = 0x0002;
+const WM_ACTIVATE: UINT = 0x0006;
+const WM_CLOSE: UINT = 0x0010;
+const WM_KEYDOWN: UINT = 0x0100;
+const WM_MOUSEMOVE: UINT = 0x0200;
+const WM_MOUSEHOVER: UINT = 0x02A1;
+const WM_MOUSELEAVE: UINT = 0x02A3;
 const WM_SIZE: UINT = 0x0005;
 const WM_PAINT: UINT = 0x000F;
 const WM_ERASEBKGND: UINT = 0x0014;
@@ -86,6 +114,9 @@ const TRANSPARENT: i32 = 1;
 const class_name = L("koreterm.rdp_group");
 const sample_timer: usize = 0x5247; // "RG"
 const sample_ms: u32 = 3000;
+const zoom_class_name = L("koreterm.rdp_group_zoom");
+/// How long the mouse rests on a cell before its zoom opens.
+const hover_ms: u32 = 800;
 
 /// The colors a group asks its sessions for, before the automatic cap.
 pub const Colors = enum(u8) {
@@ -129,6 +160,13 @@ pub const Member = struct {
     own: rdp_pane.Options,
     /// The mouse and keys reach it (Interact).
     interactive: bool = false,
+    /// "Fit all": the session's desktop is the monitor's size, scaled down
+    /// into the cell, so the windows open in it fit (small). Off, it keeps
+    /// the size it had (`kept_w` x `kept_h`, given back when it is turned
+    /// off).
+    fit_all: bool = false,
+    kept_w: i32 = 0,
+    kept_h: i32 = 0,
     /// Its cell, strip included, in the grid's client coordinates.
     cell: RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
 
@@ -216,6 +254,13 @@ pub const Group = struct {
     font_dpi: u32 = 0,
     /// Its tab was closed (it is kept for undo): Add to Group leaves it out.
     closed: bool = false,
+    /// The member shown large in the zoom window (`openZoom`): its session
+    /// sits in that window until it closes.
+    zoom: ?*Member = null,
+    zoom_hwnd: ?HWND = null,
+    /// The member whose zoom just closed: the mouse resting on it again
+    /// does not reopen it until it leaves that cell.
+    hover_blocked: ?*Member = null,
 
     /// A grid covering `parent`'s client area, empty.
     pub fn create(alloc: Allocator, parent: HWND, hooks: Hooks, name: ?[]const u8) !*Group {
@@ -245,6 +290,7 @@ pub const Group = struct {
     /// End the grid and every session still in it (its tab is going, with
     /// its window: a closing tab lets them go first, `releaseAll`).
     pub fn destroy(self: *Group) void {
+        self.closeZoom();
         _ = KillTimer(self.hwnd, sample_timer);
         _ = SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, 0);
         for (self.members.items) |member| {
@@ -303,6 +349,8 @@ pub const Group = struct {
         pane.reparent(self.hwnd, member.events());
         pane.setInteractive(false);
         self.layout();
+        // Fit all from the start: the whole desktop, small, nothing cut.
+        self.fitAll(member);
         // No reconnect to join (`applyLevel`): the session keeps its
         // quality and sound until the group's colors are picked.
         self.applyLevel(false);
@@ -327,9 +375,15 @@ pub const Group = struct {
         // scales it (`keepDesktop`).
         var area: RECT = undefined;
         if (GetClientRect(self.hwnd, &area) == 0 or area.right < 200 or area.bottom < 200) area = .{ .left = 0, .top = 0, .right = 1280, .bottom = 800 };
-        const pane = make(ctx, self.hwnd, area.right, area.bottom, self.memberOptions(own), member.events()) orelse return error.PaneCreationFailed;
+        // Fit all from the start: it connects at the monitor's size, and
+        // Keep size gives it the grid's.
+        const desk = self.monitorSize() orelse [2]i32{ area.right, area.bottom };
+        const pane = make(ctx, self.hwnd, desk[0], desk[1], self.memberOptions(own), member.events()) orelse return error.PaneCreationFailed;
         pane.keepDesktop(true);
         member.pane = pane;
+        member.fit_all = true;
+        member.kept_w = area.right;
+        member.kept_h = area.bottom;
         self.members.append(self.alloc, member) catch |err| {
             pane.destroy();
             return err;
@@ -349,6 +403,8 @@ pub const Group = struct {
     /// `member` goes back to a tab of its own, with its connection's own
     /// settings.
     pub fn release(self: *Group, member: *Member) void {
+        if (self.zoom == member) self.closeZoom();
+        if (self.hover_blocked == member) self.hover_blocked = null;
         for (self.members.items, 0..) |other, i| if (other == member) {
             _ = self.members.orderedRemove(i);
             break;
@@ -517,12 +573,15 @@ pub const Group = struct {
         for (self.members.items, 0..) |member, i| {
             const cell = self.cellRect(i);
             member.cell = cell;
+            // The zoomed session is in the zoom window.
+            if (self.zoom == member) continue;
             member.pane.placeIn(cell.left, cell.top + strip, @max(1, cell.right - cell.left), @max(1, cell.bottom - cell.top - strip));
         }
     }
 
-    /// A strip's two buttons: Interact (or Watch only) and Ungroup.
-    fn stripButtons(self: *const Group, member: *const Member) [2]RECT {
+    /// A strip's buttons: Interact (or Watch only), Ungroup, and Fit all
+    /// (or Keep size).
+    fn stripButtons(self: *const Group, member: *const Member) [3]RECT {
         const strip = self.stripHeight();
         const w = self.scaled(76);
         const pad = self.scaled(4);
@@ -530,7 +589,8 @@ pub const Group = struct {
         const bottom = member.cell.top + strip - self.scaled(2);
         const ungroup: RECT = .{ .left = member.cell.right - pad - w, .top = top, .right = member.cell.right - pad, .bottom = bottom };
         const interact: RECT = .{ .left = ungroup.left - pad - w, .top = top, .right = ungroup.left - pad, .bottom = bottom };
-        return .{ interact, ungroup };
+        const fit: RECT = .{ .left = interact.left - pad - w, .top = top, .right = interact.left - pad, .bottom = bottom };
+        return .{ interact, ungroup, fit };
     }
 
     fn ensureFont(self: *Group) ?*anyopaque {
@@ -586,12 +646,21 @@ pub const Group = struct {
             fill(hdc, bar, if (member.interactive) 0x00A05A1E else 0x002E2E2E);
             const buttons = self.stripButtons(member);
             bar.left += self.scaled(8);
-            bar.right = buttons[0].left - self.scaled(4);
+            bar.right = buttons[2].left - self.scaled(4);
             text(hdc, bar, member.label, 0x00F0F0F0, 0);
+            if (self.zoom == member) {
+                const picture: RECT = .{ .left = member.cell.left, .top = member.cell.top + strip, .right = member.cell.right, .bottom = member.cell.bottom };
+                fill(hdc, picture, 0x00202020);
+                text(hdc, picture, "Shown in the zoom window.", 0x00808080, DT_CENTER);
+            }
             for (buttons, 0..) |button, i| {
                 fill(hdc, button, 0x00404040);
                 var inner = button;
-                const caption = if (i == 1) "Ungroup" else if (member.interactive) "Watch only" else "Interact";
+                const caption = switch (i) {
+                    0 => if (member.interactive) "Watch only" else "Interact",
+                    1 => "Ungroup",
+                    else => if (member.fit_all) "Keep size" else "Fit all",
+                };
                 text(hdc, &inner, caption, 0x00F0F0F0, DT_CENTER);
             }
         }
@@ -602,12 +671,51 @@ pub const Group = struct {
             const buttons = self.stripButtons(member);
             if (inside(buttons[1], x, y)) return self.release(member);
             if (inside(buttons[0], x, y)) return self.toggleInteract(member);
+            if (inside(buttons[2], x, y)) return self.toggleFitAll(member);
         }
+    }
+
+    /// Fit all: ask the session for a desktop the size of the monitor the
+    /// group is on, which its cell scales down (everything small, nothing
+    /// cut). Keep size: the size it had before. Either way the server
+    /// rearranges the windows open in it, as for any display change.
+    fn toggleFitAll(self: *Group, member: *Member) void {
+        self.closeZoom();
+        if (!member.fit_all) {
+            self.fitAll(member);
+        } else {
+            member.fit_all = false;
+            if (member.kept_w > 0 and member.kept_h > 0) member.pane.setDesktopSize(member.kept_w, member.kept_h);
+        }
+        _ = InvalidateRect(self.hwnd, null, 0);
+    }
+
+    /// Fit all for `member` (a session joining starts so), keeping the
+    /// size it had for Keep size.
+    fn fitAll(self: *Group, member: *Member) void {
+        const size = self.monitorSize() orelse return;
+        const now = member.pane.desktopSize();
+        member.kept_w = now[0];
+        member.kept_h = now[1];
+        member.fit_all = true;
+        member.pane.setDesktopSize(size[0], size[1]);
+    }
+
+    /// The pixel size of the monitor the grid is on.
+    fn monitorSize(self: *const Group) ?[2]i32 {
+        const monitor = MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTONEAREST) orelse return null;
+        var info: MONITORINFO = .{ .cbSize = @sizeOf(MONITORINFO), .rcMonitor = undefined, .rcWork = undefined, .dwFlags = 0 };
+        if (GetMonitorInfoW(monitor, &info) == 0) return null;
+        const w = info.rcMonitor.right - info.rcMonitor.left;
+        const h = info.rcMonitor.bottom - info.rcMonitor.top;
+        if (w <= 0 or h <= 0) return null;
+        return .{ w, h };
     }
 
     /// Interact: the mouse and keys reach this session (one at a time);
     /// Watch only takes them away again.
     fn toggleInteract(self: *Group, member: *Member) void {
+        self.closeZoom();
         const on = !member.interactive;
         for (self.members.items) |other| if (other.interactive and other != member) {
             other.interactive = false;
@@ -617,6 +725,93 @@ pub const Group = struct {
         member.pane.setInteractive(on);
         if (on) member.pane.focus();
         _ = InvalidateRect(self.hwnd, null, 0);
+    }
+
+    /// The watched member whose picture (its cell below the strip) is at
+    /// `x`, `y` in the grid.
+    fn pictureAt(self: *const Group, x: i32, y: i32) ?*Member {
+        const strip = self.stripHeight();
+        for (self.members.items) |member| {
+            const picture: RECT = .{ .left = member.cell.left, .top = member.cell.top + strip, .right = member.cell.right, .bottom = member.cell.bottom };
+            if (inside(picture, x, y)) return member;
+        }
+        return null;
+    }
+
+    /// The mouse moved in the grid (a watched session's control is
+    /// disabled, so the grid gets the mouse over it): wait for it to rest.
+    fn mouseMoved(self: *Group, x: i32, y: i32) void {
+        const member = self.pictureAt(x, y);
+        if (member != self.hover_blocked) self.hover_blocked = null;
+        var track: TRACKMOUSEEVENT = .{ .dwFlags = TME_HOVER | TME_LEAVE, .hwndTrack = self.hwnd, .dwHoverTime = hover_ms };
+        _ = TrackMouseEvent(&track);
+    }
+
+    /// The mouse rested at `x`, `y`: the zoom of the session under it.
+    fn mouseRested(self: *Group, x: i32, y: i32) void {
+        const member = self.pictureAt(x, y) orelse return;
+        if (member == self.hover_blocked or member.interactive or self.zoom != null) return;
+        self.openZoom(member) catch |err| log.warn("rdp group: the zoom did not open err={}", .{err});
+    }
+
+    /// Show `member`'s session large, live and watch only, in a window of
+    /// its own over the grid (80% of the monitor's work area): the control
+    /// moves there without reconnecting (`Pane.reparent`) and back to its
+    /// cell when the window closes (a click in it, Esc, its X, or a click
+    /// anywhere else).
+    fn openZoom(self: *Group, member: *Member) !void {
+        try registerZoomClass();
+        const monitor = MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTONEAREST) orelse return error.NoMonitor;
+        var info: MONITORINFO = .{ .cbSize = @sizeOf(MONITORINFO), .rcMonitor = undefined, .rcWork = undefined, .dwFlags = 0 };
+        if (GetMonitorInfoW(monitor, &info) == 0) return error.NoMonitor;
+        const work = info.rcWork;
+        const w = @divTrunc((work.right - work.left) * 8, 10);
+        const h = @divTrunc((work.bottom - work.top) * 8, 10);
+        const x = work.left + @divTrunc(work.right - work.left - w, 2);
+        const y = work.top + @divTrunc(work.bottom - work.top - h, 2);
+        const title = try std.fmt.allocPrint(self.alloc, "{s} (zoom: click, Esc or click outside to close)", .{member.label});
+        defer self.alloc.free(title);
+        const wide = try std.unicode.utf8ToUtf16LeAllocZ(self.alloc, title);
+        defer self.alloc.free(wide);
+        const WS_POPUP: u32 = 0x80000000;
+        const WS_CAPTION: u32 = 0x00C00000;
+        const WS_SYSMENU: u32 = 0x00080000;
+        const WS_THICKFRAME: u32 = 0x00040000;
+        const WS_CLIPCHILDREN: u32 = 0x02000000;
+        const GA_ROOT: UINT = 2;
+        const owner = GetAncestor(self.hwnd, GA_ROOT);
+        const hwnd = CreateWindowExW(0, zoom_class_name, wide.ptr, WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_CLIPCHILDREN, x, y, w, h, owner, null, GetModuleHandleW(null), null) orelse return error.WindowCreationFailed;
+        _ = SetWindowLongPtrW(hwnd, GWLP_USERDATA, @bitCast(@intFromPtr(self)));
+        self.zoom = member;
+        self.zoom_hwnd = hwnd;
+        member.pane.reparent(hwnd, member.events());
+        var client: RECT = undefined;
+        if (GetClientRect(hwnd, &client) != 0) member.pane.placeIn(0, 0, client.right, client.bottom);
+        const SW_SHOW: i32 = 5;
+        _ = ShowWindow(hwnd, SW_SHOW);
+        _ = SetFocus(hwnd);
+        _ = InvalidateRect(self.hwnd, null, 0);
+    }
+
+    /// The zoom window's session back in its cell, and the window gone.
+    fn closeZoom(self: *Group) void {
+        const member = self.zoom orelse return;
+        const hwnd = self.zoom_hwnd.?;
+        self.zoom = null;
+        self.zoom_hwnd = null;
+        self.hover_blocked = member;
+        member.pane.reparent(self.hwnd, member.events());
+        self.layout();
+        _ = SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        _ = DestroyWindow(hwnd);
+        _ = InvalidateRect(self.hwnd, null, 0);
+    }
+
+    /// The zoom window's client area changed: the session follows.
+    fn zoomResized(self: *Group) void {
+        const member = self.zoom orelse return;
+        var client: RECT = undefined;
+        if (GetClientRect(self.zoom_hwnd.?, &client) != 0) member.pane.placeIn(0, 0, client.right, client.bottom);
     }
 
     /// Find the member a pane's events are for, still in the group.
@@ -630,7 +825,16 @@ fn memberEnded(ctx: *anyopaque) void {
     const member: *Member = @ptrCast(@alignCast(ctx));
     const group = member.group;
     if (!group.holds(member)) return;
-    // The pane destroyed itself: only the cell goes.
+    // The pane destroyed itself: only the cell goes (and the zoom window
+    // it was shown in).
+    if (group.zoom == member) {
+        const hwnd = group.zoom_hwnd.?;
+        group.zoom = null;
+        group.zoom_hwnd = null;
+        _ = SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        _ = DestroyWindow(hwnd);
+    }
+    if (group.hover_blocked == member) group.hover_blocked = null;
     for (group.members.items, 0..) |other, i| if (other == member) {
         _ = group.members.orderedRemove(i);
         break;
@@ -695,6 +899,79 @@ fn registerClass() !void {
     class_registered = true;
 }
 
+fn pointOf(lparam: LPARAM) [2]i32 {
+    const bits: usize = @bitCast(lparam);
+    return .{
+        @as(i16, @bitCast(@as(u16, @truncate(bits)))),
+        @as(i16, @bitCast(@as(u16, @truncate(bits >> 16)))),
+    };
+}
+
+var zoom_class_registered = false;
+
+fn registerZoomClass() !void {
+    if (zoom_class_registered) return;
+    const IDC_ARROW: usize = 32512;
+    const class: WNDCLASSEXW = .{
+        .cbSize = @sizeOf(WNDCLASSEXW),
+        .style = 0,
+        .lpfnWndProc = &zoomProc,
+        .cbClsExtra = 0,
+        .cbWndExtra = 0,
+        .hInstance = GetModuleHandleW(null) orelse return error.ClassRegistrationFailed,
+        .hIcon = null,
+        .hCursor = LoadCursorW(null, IDC_ARROW),
+        .hbrBackground = null,
+        .lpszMenuName = null,
+        .lpszClassName = zoom_class_name,
+        .hIconSm = null,
+    };
+    if (RegisterClassExW(&class) == 0) return error.ClassRegistrationFailed;
+    zoom_class_registered = true;
+}
+
+/// The zoom window (`Group.openZoom`). Its session's control is disabled,
+/// so a click on it reaches this window, which closes. So does losing the
+/// activation (a click anywhere else), posted so the window is not
+/// destroyed inside its own activation change.
+fn zoomProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(.winapi) LRESULT {
+    const group = groupOf(hwnd) orelse return DefWindowProcW(hwnd, msg, wparam, lparam);
+    const WA_INACTIVE: usize = 0;
+    const VK_ESCAPE: usize = 0x1B;
+    switch (msg) {
+        WM_ERASEBKGND => return 1,
+        WM_PAINT => {
+            var ps: PAINTSTRUCT = undefined;
+            const hdc = BeginPaint(hwnd, &ps);
+            defer _ = EndPaint(hwnd, &ps);
+            var client: RECT = undefined;
+            if (GetClientRect(hwnd, &client) != 0) fill(hdc, client, 0x00000000);
+            return 0;
+        },
+        WM_SIZE => {
+            group.zoomResized();
+            return 0;
+        },
+        WM_LBUTTONDOWN => {
+            _ = PostMessageW(hwnd, WM_CLOSE, 0, 0);
+            return 0;
+        },
+        WM_KEYDOWN => {
+            if (wparam == VK_ESCAPE) _ = PostMessageW(hwnd, WM_CLOSE, 0, 0);
+            return 0;
+        },
+        WM_ACTIVATE => {
+            if ((wparam & 0xFFFF) == WA_INACTIVE) _ = PostMessageW(hwnd, WM_CLOSE, 0, 0);
+            return DefWindowProcW(hwnd, msg, wparam, lparam);
+        },
+        WM_CLOSE => {
+            if (group.zoom_hwnd == hwnd) group.closeZoom();
+            return 0;
+        },
+        else => return DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
 fn groupOf(hwnd: HWND) ?*Group {
     const raw = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
     if (raw == 0) return null;
@@ -724,10 +1001,22 @@ fn wndProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(.wina
             return 0;
         },
         WM_LBUTTONDOWN => {
-            const bits: usize = @bitCast(lparam);
-            const x: i32 = @as(i16, @bitCast(@as(u16, @truncate(bits))));
-            const y: i32 = @as(i16, @bitCast(@as(u16, @truncate(bits >> 16))));
-            group.click(x, y);
+            const point = pointOf(lparam);
+            group.click(point[0], point[1]);
+            return 0;
+        },
+        WM_MOUSEMOVE => {
+            const point = pointOf(lparam);
+            group.mouseMoved(point[0], point[1]);
+            return 0;
+        },
+        WM_MOUSEHOVER => {
+            const point = pointOf(lparam);
+            group.mouseRested(point[0], point[1]);
+            return 0;
+        },
+        WM_MOUSELEAVE => {
+            group.hover_blocked = null;
             return 0;
         },
         WM_DESTROY => {
@@ -889,4 +1178,10 @@ test "rdp group: a renamed group's line moves, and a new name skips saved ones" 
     const name = try defaultName(alloc, "Group 1\t16\tweb\r\nGroup 3\t8\tx\n");
     defer alloc.free(name);
     try std.testing.expectEqualStrings("Group 2", name);
+}
+
+test "rdp group: TRACKMOUSEEVENT matches winuser.h" {
+    try std.testing.expectEqual(@as(usize, if (@sizeOf(usize) == 8) 24 else 16), @sizeOf(TRACKMOUSEEVENT));
+    try std.testing.expectEqual(@as(usize, 8), @offsetOf(TRACKMOUSEEVENT, "hwndTrack"));
+    try std.testing.expectEqual(@as(usize, if (@sizeOf(usize) == 8) 16 else 12), @offsetOf(TRACKMOUSEEVENT, "dwHoverTime"));
 }

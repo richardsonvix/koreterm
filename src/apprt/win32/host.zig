@@ -8381,7 +8381,6 @@ pub const Host = struct {
         // Profile list — each profile gets a numbered shortcut hint. Remote
         // Desktop profiles go in their own submenu, and every terminal
         // profile also in "Run as administrator".
-        const selected_idx = self.selectedProfileIndex();
         const rdp_menu = sys.CreatePopupMenu() orelse return;
         const admin_menu = sys.CreatePopupMenu() orelse return;
         var rdp_count: usize = 0;
@@ -8410,9 +8409,8 @@ pub const Host = struct {
                     continue;
                 }
                 if (listed) {
-                    const is_selected = selected_idx != null and selected_idx.? == i;
-                    const flags: UINT = if (is_selected) c.MF_STRING | c.MF_CHECKED else c.MF_STRING;
-                    _ = sys.AppendMenuW(menu, flags, c.CTX_PROFILE_BASE + i, label_w.ptr);
+                    // A pick, not a setting: no check mark on the last one.
+                    _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_PROFILE_BASE + i, label_w.ptr);
                     terminals += 1;
                 }
                 const plain_w = std.unicode.utf8ToUtf16LeAllocZ(alloc, profile.label) catch continue;

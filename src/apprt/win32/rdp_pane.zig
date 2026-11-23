@@ -280,6 +280,8 @@ extern "user32" fn RemovePropW(hwnd: HWND, name: LPCWSTR) callconv(.winapi) ?*an
 extern "user32" fn GetWindowLongPtrW(hwnd: HWND, index: i32) callconv(.winapi) isize;
 extern "user32" fn SetParent(child: HWND, parent: HWND) callconv(.winapi) ?HWND;
 extern "user32" fn EnableWindow(hwnd: HWND, enable: BOOL) callconv(.winapi) BOOL;
+extern "user32" fn GetFocus() callconv(.winapi) ?HWND;
+extern "user32" fn IsChild(parent: HWND, hwnd: HWND) callconv(.winapi) BOOL;
 extern "user32" fn SetWindowLongPtrW(hwnd: HWND, index: i32, value: isize) callconv(.winapi) isize;
 
 extern "ole32" fn CLSIDFromProgID(progid: [*:0]const u16, clsid: *GUID) callconv(.winapi) HRESULT;
@@ -1114,8 +1116,22 @@ pub const Pane = struct {
     fn fitSession(self: *Pane) void {
         if (self.keep_desktop) return;
         const wanted = self.wantedDesktop();
-        const w = wanted[0];
-        const h = wanted[1];
+        self.askDesktop(wanted[0], wanted[1]);
+    }
+
+    /// The remote desktop's size now.
+    pub fn desktopSize(self: *const Pane) [2]i32 {
+        return .{ self.desk_w, self.desk_h };
+    }
+
+    /// Ask the session for a `width` x `height` desktop even while it keeps
+    /// its size (`keep_desktop`): a group's "Fit all" and its way back.
+    /// The control scales it into the pane (`SmartSizing`).
+    pub fn setDesktopSize(self: *Pane, width: i32, height: i32) void {
+        self.askDesktop(std.math.clamp(width, 200, 8192), std.math.clamp(height, 200, 8192));
+    }
+
+    fn askDesktop(self: *Pane, w: i32, h: i32) void {
         if (w == self.desk_w and h == self.desk_h) return;
         if (!self.isConnected()) {
             if (self.started and !self.options_reconnect) return;
@@ -1153,6 +1169,19 @@ pub const Pane = struct {
     /// Whether the mouse and keyboard reach the session. Off, it is only
     /// watched (a group's grid); the control still draws.
     pub fn setInteractive(self: *Pane, on: bool) void {
+        // Disabling the control does not take the focus from its input
+        // child (the session's own window inside it): a watched session
+        // that had the focus (the tab it came from, or Interact) kept
+        // getting every key typed in koreterm, and a Windows key opened
+        // the remote Start menu (reported 2026-11-23, CND03 in a group).
+        // The focus goes to the parent (the group's grid) first.
+        if (!on) {
+            if (GetFocus()) |focused| {
+                if (focused == self.hwnd or IsChild(self.hwnd, focused) != 0) {
+                    if (GetParent(self.hwnd)) |parent| _ = SetFocus(parent);
+                }
+            }
+        }
         _ = EnableWindow(self.hwnd, @intFromBool(on));
     }
 
