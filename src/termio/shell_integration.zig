@@ -992,10 +992,15 @@ const cmd_prompt_user_osc_a = "$E]133;A$E\\";
 // The kitty scheme keeps cmd's unescaped `$P` Windows path intact.
 const cmd_prompt_cwd = "$E]9;9;kitty-shell-cwd://localhost/$P$E\\";
 const cmd_prompt_mark_prefix = cmd_prompt_osc_a ++ cmd_prompt_cwd;
-// cmd never requests Kitty keys or modifyOtherKeys. Recover modes left by
-// an abnormally exited TUI when the shell next owns the terminal. Do not
-// reset on generic OSC 133 A: Kitty-aware shells use it too.
-const cmd_prompt_prefix = "$E[<99u$E[>4;0m" ++ cmd_prompt_mark_prefix;
+// cmd never requests Kitty keys, modifyOtherKeys or bracketed paste.
+// Recover modes left by an abnormally exited TUI when the shell next owns
+// the terminal: a paste under a leftover DECSET 2004 reaches the shell as
+// `[200~text[201~`. Do not reset on generic OSC 133 A: Kitty-aware shells
+// use it too.
+const cmd_prompt_prefix = "$E[<99u$E[>4;0m$E[?2004l" ++ cmd_prompt_mark_prefix;
+// The prefix before the bracketed paste reset; a cmd started from such a
+// release inherits it through PROMPT and gets today's prefix in its place.
+const cmd_prompt_keys_prefix = "$E[<99u$E[>4;0m" ++ cmd_prompt_mark_prefix;
 // What releases before `redraw=0` put in front of the prompt. A cmd started
 // from one of them inherits it through PROMPT, and gets today's prefix in its
 // place rather than a second wrapping.
@@ -1026,7 +1031,7 @@ fn buildCmdPrompt(alloc: Allocator, existing: ?[]const u8) ![]u8 {
         if (std.mem.indexOf(u8, current, cmd_prompt_prefix) != null) {
             return try alloc.dupe(u8, current);
         }
-        for ([_][]const u8{ cmd_prompt_mark_prefix, cmd_prompt_legacy_prefix }) |old_prefix| {
+        for ([_][]const u8{ cmd_prompt_keys_prefix, cmd_prompt_mark_prefix, cmd_prompt_legacy_prefix }) |old_prefix| {
             if (std.mem.indexOf(u8, current, old_prefix)) |at| {
                 return try std.mem.concat(alloc, u8, &.{
                     current[0..at],
@@ -1169,7 +1174,7 @@ test "cmd prompt construction defaults and preserves escapes" {
     defer testing.allocator.free(prompt);
 
     try testing.expectEqualStrings(
-        "$E[<99u$E[>4;0m$E]133;A;redraw=0$E\\$E]9;9;kitty-shell-cwd://localhost/$P$E\\$P$G$E]133;B$E\\",
+        "$E[<99u$E[>4;0m$E[?2004l$E]133;A;redraw=0$E\\$E]9;9;kitty-shell-cwd://localhost/$P$E\\$P$G$E]133;B$E\\",
         prompt,
     );
 }
@@ -1181,7 +1186,7 @@ test "cmd prompt construction preserves user prompt" {
     defer testing.allocator.free(prompt);
 
     try testing.expectEqualStrings(
-        "$E[<99u$E[>4;0m$E]133;A;redraw=0$E\\$E]9;9;kitty-shell-cwd://localhost/$P$E\\[$T] $P$_$$ $E]133;B$E\\",
+        "$E[<99u$E[>4;0m$E[?2004l$E]133;A;redraw=0$E\\$E]9;9;kitty-shell-cwd://localhost/$P$E\\[$T] $P$_$$ $E]133;B$E\\",
         prompt,
     );
 }
@@ -1203,7 +1208,7 @@ test "cmd prompt construction separates a dangling trailing dollar" {
     const dangling = try buildCmdPrompt(testing.allocator, "$P$G$");
     defer testing.allocator.free(dangling);
     try testing.expectEqualStrings(
-        "$E[<99u$E[>4;0m$E]133;A;redraw=0$E\\$E]9;9;kitty-shell-cwd://localhost/$P$E\\$P$G$S$E]133;B$E\\",
+        "$E[<99u$E[>4;0m$E[?2004l$E]133;A;redraw=0$E\\$E]9;9;kitty-shell-cwd://localhost/$P$E\\$P$G$S$E]133;B$E\\",
         dangling,
     );
 
@@ -1211,7 +1216,7 @@ test "cmd prompt construction separates a dangling trailing dollar" {
     const balanced = try buildCmdPrompt(testing.allocator, "$P$G$$");
     defer testing.allocator.free(balanced);
     try testing.expectEqualStrings(
-        "$E[<99u$E[>4;0m$E]133;A;redraw=0$E\\$E]9;9;kitty-shell-cwd://localhost/$P$E\\$P$G$$$E]133;B$E\\",
+        "$E[<99u$E[>4;0m$E[?2004l$E]133;A;redraw=0$E\\$E]9;9;kitty-shell-cwd://localhost/$P$E\\$P$G$$$E]133;B$E\\",
         balanced,
     );
 
@@ -1247,6 +1252,18 @@ test "cmd prompt construction is idempotent" {
 test "PKG16 cmd prompt upgrades inherited marks without duplicating them" {
     const alloc = std.testing.allocator;
     const old = "clink:" ++ cmd_prompt_mark_prefix ++ "$P$G" ++ cmd_prompt_suffix;
+    const upgraded = try buildCmdPrompt(alloc, old);
+    defer alloc.free(upgraded);
+    const expected = "clink:" ++ cmd_prompt_prefix ++ "$P$G" ++ cmd_prompt_suffix;
+    try std.testing.expectEqualStrings(expected, upgraded);
+    const repeated = try buildCmdPrompt(alloc, upgraded);
+    defer alloc.free(repeated);
+    try std.testing.expectEqualStrings(expected, repeated);
+}
+
+test "cmd prompt upgrades a prompt wrapped before the bracketed paste reset" {
+    const alloc = std.testing.allocator;
+    const old = "clink:" ++ cmd_prompt_keys_prefix ++ "$P$G" ++ cmd_prompt_suffix;
     const upgraded = try buildCmdPrompt(alloc, old);
     defer alloc.free(upgraded);
     const expected = "clink:" ++ cmd_prompt_prefix ++ "$P$G" ++ cmd_prompt_suffix;

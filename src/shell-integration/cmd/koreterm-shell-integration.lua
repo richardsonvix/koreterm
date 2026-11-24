@@ -30,7 +30,7 @@ if internal and type(internal._filter_prompt) == "function" and
             -- by the rows its last drawing takes at the new width, so the
             -- terminal must keep those rows and reflow them as the console
             -- does, not clear them.
-            local prefix = ESC .. "[<99u" .. ESC .. "[>4;0m" ..
+            local prefix = ESC .. "[<99u" .. ESC .. "[>4;0m" .. ESC .. "[?2004l" ..
                 ESC .. "]133;A;redraw=0" .. BEL ..
                 ESC .. "]9;9;kitty-shell-cwd://localhost/" .. os.getcwd() .. BEL
             prompt = prefix .. prompt .. ESC .. "]133;B" .. BEL

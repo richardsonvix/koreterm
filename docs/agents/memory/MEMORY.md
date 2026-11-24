@@ -7,7 +7,7 @@
 - [Build environment](koreterm-build-env.md) — ZIG_GLOBAL_CACHE_DIR on D:, update.zip packaging steps
 - [CI removed](ci-workflows-disabled.md) — fork has no GitHub Actions: workflows disabled then deleted 2026-11-13
 - [Elevated instance](elevated-tab-mark.md) — admin tabs live only in a separate UAC instance; no color mark; built into 1.3.145. Own admin-only session file built into 1.3.152
-- [RDP clipboard release](rdp-clipboard-release.md) — RDP tab froze pastes; session keeps clipboard only while focused (built 2026-11-16, unverified)
+- [RDP clipboard release](rdp-clipboard-release.md) — pastes failed beside RDP tabs; busy-clipboard worker read, owned local copy, prompt ?2004l reset: built into 1.3.155, unverified on a real session
 - [Tab detach backlog](tab-detach-backlog.md) — pending detach/dock for all tabs, menu only, build + filtered tests
 - [RDP server actions](rdp-server-actions.md) — Server Status, sign-out, Explorer restart, forced restart, admin login, TrustedHosts: written 2026-11-17 uncompiled for 1.3.149
 - [RDP .rdp export, persistent reconnect, group restore](rdp-file-export.md) — .rdp export (password via DPAPI added 2026-11-19 for 1.3.152), keep-reconnecting, group restore; open question on reason=5 drops; built into 1.3.152

@@ -215,7 +215,7 @@ try {
     }
     $B = "$([char]27)]133;B$([char]7)"
     $A = "]133;A;cl=line;aid=$PID;redraw=0"
-    $modeReset = "$([char]27)[<99u$([char]27)[>4;0m"
+    $modeReset = "$([char]27)[<99u$([char]27)[>4;0m$([char]27)[?2004l"
 
     $drawn = Invoke-TestPrompt
     # A generated function, not an alias: `Get-Command prompt` stays a

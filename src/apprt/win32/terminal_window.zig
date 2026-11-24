@@ -1844,8 +1844,25 @@ pub const Surface = struct {
         const include_files = state == .paste;
         const contents = if (self.app.test_clipboard_source) |source|
             try selectClipboardContents(self.app.core_app.alloc, include_files, source)
-        else
-            try self.readClipboard(include_files);
+        else contents: {
+            if (!openClipboard(self.hwnd)) {
+                const open_error = lastError();
+                // Another program (or a session's copy being taken over,
+                // `rdp_clipboard.release`) holds the clipboard open longer
+                // than the UI thread's 5 ms: read it on a worker thread,
+                // which waits longer, rather than drop the paste unseen.
+                if (self.hwnd) |hwnd| {
+                    const kind: usize = if (state == .paste) 0 else 1;
+                    if (rdp_clipboard.readText(hwnd, c.WM_WINHOSTTY_CLIPBOARD_TEXT, kind)) |_| {
+                        log.info("clipboard busy: reading it on a worker thread", .{});
+                        return true;
+                    } else |err| log.warn("clipboard read thread failed err={}", .{err});
+                }
+                return open_error;
+            }
+            defer _ = sys.CloseClipboard();
+            break :contents try selectClipboardContents(self.app.core_app.alloc, include_files, system_clipboard);
+        };
         return self.completeClipboardRead(state, contents);
     }
 
@@ -1857,7 +1874,7 @@ pub const Surface = struct {
         const state: apprt.ClipboardRequest = if (kind == 0) .paste else .{ .osc_52_read = .standard };
         if (!read.opened) {
             log.warn("session clipboard would not open", .{});
-            if (state == .paste) self.showRdpNotice("The clipboard is busy (a Remote Desktop session is answering it): paste again in a moment.");
+            if (state == .paste) self.showRdpNotice("The clipboard is busy (another program is holding it open): paste again in a moment.");
             return;
         }
         const alloc = self.app.core_app.alloc;
@@ -4905,7 +4922,7 @@ pub const Surface = struct {
         if (focused) self.clearBell();
         // A terminal took the focus from a Remote Desktop session: the
         // session lets go of the clipboard (`rdp_clipboard.release`).
-        if (focused and self.rdp_pane == null and self.rdp_group == null) rdp_clipboard.release();
+        if (focused and self.rdp_pane == null and self.rdp_group == null) rdp_clipboard.release(self.hwnd);
         if (!self.core_initialized) return;
         if (focused) self.app.core_app.focusSurface(self.core());
         self.core_surface.focusCallback(focused) catch |err| {
@@ -5950,16 +5967,6 @@ pub const Surface = struct {
         const link = self.pending_link_open orelse return null;
         self.pending_link_open = null;
         return link;
-    }
-
-    /// What the clipboard holds: its text, else (for `include_files`) the
-    /// paths of copied files, else nothing. An open failure is an error, never
-    /// an empty clipboard.
-    fn readClipboard(self: *Surface, include_files: bool) !ClipboardContents {
-        if (!openClipboard(self.hwnd)) return lastError();
-        defer _ = sys.CloseClipboard();
-
-        return try selectClipboardContents(self.app.core_app.alloc, include_files, system_clipboard);
     }
 
     /// The open system clipboard, for `selectClipboardContents`.

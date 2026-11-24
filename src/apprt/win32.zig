@@ -11543,7 +11543,7 @@ pub fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
             if (host) |v| if (wParam != 0) v.app.reconcilePaneDividerHeldKeys(&App.asyncKeyDown);
             // Another program is in front: what a Remote Desktop session
             // copied becomes a local copy it can paste without the session.
-            if (wParam == 0) @import("win32/rdp_clipboard.zig").release();
+            if (wParam == 0) @import("win32/rdp_clipboard.zig").release(hwnd);
             return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
         // Per-host tween heartbeat. Runs at ~16 ms while any chrome

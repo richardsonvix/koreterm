@@ -1,3 +1,16 @@
+koreterm 1.3.155
+
+- A paste into PowerShell or cmd no longer arrives with [200~ before it
+  and [201~ after it when a program closed earlier (killed, say) had
+  left bracketed paste on: the shell's prompt now turns it off.
+- A paste that finds the clipboard busy (another program holding it
+  open, or koreterm taking over what a Remote Desktop session copied
+  when you leave its tab) now waits for it instead of pasting nothing;
+  if it stays busy, a notice says so.
+- What a Remote Desktop session copied is kept on the clipboard when
+  you leave its tab with a koreterm window as its owner, so it can no
+  longer leave the clipboard empty.
+
 koreterm 1.3.154
 
 - A Remote Desktop session in a group now shows its whole desktop,

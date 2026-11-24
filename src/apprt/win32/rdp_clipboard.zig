@@ -35,14 +35,25 @@ const CF_DIB: UINT = 8;
 
 /// Open the clipboard from a worker thread, which may wait: another
 /// program can hold it open for a moment. Not the facade's
-/// `openClipboard`, whose 5 ms budget is for the UI thread.
-fn openClipboard() bool {
-    for (0..20) |_| {
-        if (sys.OpenClipboard(null) != 0) return true;
+/// `openClipboard`, whose 5 ms budget is for the UI thread. `owner` is the
+/// window an `EmptyClipboard` makes the owner; null when only reading.
+fn openClipboardFor(owner: ?HWND, attempts: usize) bool {
+    for (0..attempts) |_| {
+        if (sys.OpenClipboard(owner) != 0) return true;
         std.Thread.sleep(10 * std.time.ns_per_ms);
     }
     return false;
 }
+
+/// 200 ms of tries: the release's own opens.
+fn openClipboard() bool {
+    return openClipboardFor(null, 20);
+}
+
+/// How long a paste's read waits for a release in progress (its fetch from
+/// the server holds the clipboard open), then for the clipboard to open.
+const read_wait_release_steps = 250; // 20 ms each: 5 s
+const read_open_attempts = 100; // 10 ms each: 1 s
 
 /// The worker threads take their memory here: never the app's allocator.
 const worker_alloc = std.heap.page_allocator;
@@ -79,11 +90,14 @@ fn isKoretermClass(name: []const u16) bool {
 var releasing = std.atomic.Value(bool).init(false);
 
 /// The session lost the focus: when it owns the clipboard, a worker thread
-/// puts a local copy of it there instead. Nothing waits for it.
-pub fn release() void {
+/// puts a local copy of it there instead, owned by `local_owner` (a
+/// koreterm window, so `sessionOwner` never takes it for the session).
+/// Nothing waits for it; a paste that finds the clipboard busy meanwhile
+/// reads through `readText`, which waits for it.
+pub fn release(local_owner: ?HWND) void {
     if (sessionOwner() == null) return;
     if (releasing.swap(true, .acq_rel)) return;
-    const thread = std.Thread.spawn(.{}, releaseWorker, .{}) catch |err| {
+    const thread = std.Thread.spawn(.{}, releaseWorker, .{local_owner}) catch |err| {
         releasing.store(false, .release);
         log.warn("clipboard release thread failed err={}", .{err});
         return;
@@ -98,7 +112,7 @@ const Held = struct {
     bytes: []u8,
 };
 
-fn releaseWorker() void {
+fn releaseWorker(local_owner: ?HWND) void {
     defer releasing.store(false, .release);
     var held: [max_formats]Held = undefined;
     var count: usize = 0;
@@ -130,7 +144,7 @@ fn releaseWorker() void {
     if (count == 0) return;
     // Something else was copied meanwhile: that copy stays.
     if (GetClipboardOwner() != owner) return;
-    writeLocal(held[0..count]);
+    writeLocal(local_owner, held[0..count]);
 }
 
 /// The open clipboard's `id`, copied out of its global memory.
@@ -144,9 +158,12 @@ fn copyFormat(id: UINT) ?[]u8 {
     return worker_alloc.dupe(u8, from[0..size]) catch null;
 }
 
-/// `held` on the clipboard with no owner: memory first, then the empty
-/// (`clipboard_write`'s order), so a failed allocation loses nothing.
-fn writeLocal(held: []const Held) void {
+/// `held` on the clipboard, owned by `local_owner`: memory first, then the
+/// empty (`clipboard_write`'s order), so a failed allocation loses nothing.
+/// Not opened with a null owner when a window is at hand: EmptyClipboard
+/// then leaves no owner, and the documentation says SetClipboardData fails
+/// after that, which would leave the clipboard emptied.
+fn writeLocal(local_owner: ?HWND, held: []const Held) void {
     var memory: [max_formats]?*anyopaque = .{null} ** max_formats;
     defer for (memory) |handle| if (handle) |h| {
         _ = sys.GlobalFree(h);
@@ -159,14 +176,28 @@ fn writeLocal(held: []const Held) void {
         @memcpy(to[0..entry.bytes.len], entry.bytes);
         _ = sys.GlobalUnlock(handle);
     }
-    if (!openClipboard()) return;
+    // The window may be gone (its pane closed): then no owner.
+    if (!openClipboardFor(local_owner, 20) and
+        (local_owner == null or !openClipboard()))
+    {
+        log.warn("session clipboard copy: the clipboard would not open", .{});
+        return;
+    }
     defer _ = sys.CloseClipboard();
     if (sys.EmptyClipboard() == 0) return;
+    var set: usize = 0;
     for (held, 0..) |entry, i| {
         // The clipboard owns what it took.
-        if (sys.SetClipboardData(entry.id, memory[i]) != null) memory[i] = null;
+        if (sys.SetClipboardData(entry.id, memory[i]) != null) {
+            memory[i] = null;
+            set += 1;
+        }
     }
-    log.info("session clipboard kept as a local copy formats={}", .{held.len});
+    if (set == 0) {
+        log.warn("session clipboard copy set no format formats={}", .{held.len});
+    } else {
+        log.info("session clipboard kept as a local copy formats={} set={}", .{ held.len, set });
+    }
 }
 
 /// What `readText` posts back: the clipboard's CF_UNICODETEXT, without its
@@ -184,7 +215,10 @@ pub const TextRead = struct {
 
 /// Read the clipboard's text on a worker thread, which posts `msg` to
 /// `target` with `wparam` and a `*TextRead` as its lparam; the window's
-/// handler frees it. When the window is gone the worker frees it.
+/// handler frees it. When the window is gone the worker frees it. Used
+/// while a session owns the clipboard, and for any paste whose UI-thread
+/// open found the clipboard busy: it waits for a `release` in progress,
+/// then tries to open it for a second.
 pub fn readText(target: HWND, msg: UINT, wparam: usize) !void {
     const thread = try std.Thread.spawn(.{}, readWorker, .{ target, msg, wparam });
     thread.detach();
@@ -193,7 +227,11 @@ pub fn readText(target: HWND, msg: UINT, wparam: usize) !void {
 fn readWorker(target: HWND, msg: UINT, wparam: usize) void {
     const result = worker_alloc.create(TextRead) catch return;
     result.* = .{ .text_w = null, .opened = false };
-    if (openClipboard()) {
+    var waited: usize = 0;
+    while (releasing.load(.acquire) and waited < read_wait_release_steps) : (waited += 1) {
+        std.Thread.sleep(20 * std.time.ns_per_ms);
+    }
+    if (openClipboardFor(null, read_open_attempts)) {
         defer _ = sys.CloseClipboard();
         result.opened = true;
         if (sys.IsClipboardFormatAvailable(c.CF_UNICODETEXT) != 0) {
